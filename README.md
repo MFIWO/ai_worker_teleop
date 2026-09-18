@@ -2,6 +2,216 @@
 
 2026-09-18, robot `ffw-SNPR48A1112` (`192.168.6.2`).
 
+## 빠른 시작
+
+이 저장소는 **Meta Quest + ROBOTIS AI Worker(SG2)** teleoperation을 재현하기 위한 패치, 실행 스크립트와 검증 도구를 보관한다.  
+PC에서는 ROBOTIS `robotis_applications`의 Vuer/WebXR 경로를 사용하고, 로봇에서는 `cyclo_motion_controller_ros` VR controller를 사용한다. **`xr_tele` 실행 경로는 사용하지 않는다.**
+
+현재 구성은 두 가지 입력 경로를 구분한다.
+
+| 모드 | PC | Robot | 활성화 |
+|---|---|---|---|
+| Quest Controller | `controller_pc.sh` 또는 `vr.launch.py model:=sg2` | `controller_type:=vr hand:=false` | X+A, Y+B 해제 |
+| Quest Hand (원본) | `hand_original_pc.sh` | `hand_original_robot.sh` | 한 손 pinch + 반대손 fist 3초 |
+| Quest Hand (목 착용) | `hand_neck_pc.sh` | `hand_original_robot.sh` | 한 손 pinch + 반대손 fist 3초 |
+
+> **주의:** `controller_pc.sh`, `hand_original_pc.sh`, `hand_neck_pc.sh`는 시작 전에 실제 양팔을 준비 자세로 움직일 수 있다. 주변을 비우고 follower 상태와 비상정지 수단을 확인한 뒤 실행한다.
+
+### Controller 모드
+
+PC `robotis-applications` 컨테이너:
+
+```bash
+bash /root/ros2_ws/src/robotis_applications/controller_pc.sh
+```
+
+스크립트를 사용하지 않고 VR 서버만 직접 실행하려면:
+
+```bash
+RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=30 \
+  ros2 launch robotis_vuer vr.launch.py model:=sg2
+```
+
+`READY: both arms reached the pose` 이후 Robot `ai_worker` 컨테이너:
+
+```bash
+source /root/ros2_ws/install/setup.bash
+export PYTHONPATH=/opt/venv/lib/python3.12/site-packages:$PYTHONPATH
+
+RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=30 \
+  ros2 launch cyclo_motion_controller_ros ai_worker_controller.launch.py \
+  controller_type:=vr hand:=false
+```
+
+Quest 페이지를 새로고침하고 VR에 진입한 뒤 X+A로 활성화한다. Y+B는 팔 제어 해제, controller trigger는 SG2 gripper 명령에 사용한다.
+
+### Hand tracking — 원본 비교
+
+PC:
+
+```bash
+bash /root/ros2_ws/src/robotis_applications/hand_original_pc.sh
+```
+
+Robot, PC의 READY 이후:
+
+```bash
+bash /workspace/quest_sg2_teleop/hand_original_robot.sh
+```
+
+Quest에서 controller를 내려놓고 hand tracking으로 전환한다. 한 손 pinch와 반대 손 fist를 약 3초 유지하면 활성화/정지가 toggle된다. 상세 내용은 [HAND_ORIGINAL.md](HAND_ORIGINAL.md)를 참고한다.
+
+### Hand tracking — Quest 목 착용
+
+PC:
+
+```bash
+bash /root/ros2_ws/src/robotis_applications/hand_neck_pc.sh
+```
+
+Robot, PC의 READY 이후:
+
+```bash
+bash /workspace/quest_sg2_teleop/hand_original_robot.sh
+```
+
+이 모드는 Quest가 아래쪽을 향해 목/가슴에 위치할 때 head tilt가 arm target에 직접 섞이는 문제를 줄이기 위해 중력 수평 기준 변환과 tracking guard를 적용한다. 실제 손이 카메라 시야 밖으로 나가면 hand tracking 자체는 사라질 수 있다. 상세 내용은 [HAND_NECK.md](HAND_NECK.md)를 참고한다.
+
+---
+
+## 새 PC 설치
+
+### 1. 저장소 clone
+
+두 브랜치는 서로 다른 컴포넌트다. 별도 디렉터리에 clone한다.
+
+```bash
+cd ~/Downloads
+
+git clone --branch main --single-branch \
+  https://github.com/MFIWO/ai_worker_teleop.git quest_sg2_teleop
+
+mkdir -p ~/Downloads/external_repos
+cd ~/Downloads/external_repos
+
+git clone --branch robotis-applications --single-branch \
+  https://github.com/MFIWO/ai_worker_teleop.git robotis_applications
+```
+
+### 2. Docker 설치
+
+Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-compose-v2
+
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+현재 shell에 바로 적용하려면:
+
+```bash
+newgrp docker
+```
+
+확인:
+
+```bash
+groups
+docker --version
+docker compose version
+docker ps
+```
+
+새 터미널에서 `/var/run/docker.sock` permission denied가 나오면 로그인 세션에 docker group이 아직 반영되지 않은 것이다. 로그아웃/로그인하거나 해당 shell에서 `newgrp docker`를 실행한다.
+
+### 3. robotis-applications container 시작
+
+```bash
+cd ~/Downloads/external_repos/robotis_applications
+
+./docker/container.sh start
+./docker/container.sh enter
+```
+
+`unknown shorthand flag: 'f' in -f`가 나오면 Compose v2가 설치되어 있는지 확인한다.
+
+```bash
+docker compose version
+```
+
+### 4. Robot 패치 배치
+
+`main` 브랜치는 로봇 측 적용 묶음이다. 현재 운용 구조에서는 host의 영구 복사본을:
+
+```text
+/home/robotis/ai_worker/docker/workspace/quest_sg2_teleop
+```
+
+에 두고, `ai_worker` 컨테이너에서는:
+
+```text
+/workspace/quest_sg2_teleop
+```
+
+로 사용한다.
+
+컨테이너 재생성 후에는 아래 순서로 backport를 다시 적용하고 필요한 패키지를 build한다.
+
+```bash
+python3 /workspace/quest_sg2_teleop/install_backport.py
+
+source /opt/ros/jazzy/setup.bash
+source /root/ros2_ws/install/setup.bash
+
+cd /root/ros2_ws
+
+colcon build --symlink-install \
+  --packages-select cyclo_motion_controller_ros_py
+
+colcon build --symlink-install \
+  --packages-select cyclo_motion_controller_ros \
+  --cmake-target vr_controller_node \
+  --parallel-workers 1
+```
+
+### 5. Follower
+
+VR controller와 별개로 AI Worker follower가 실행되어 있어야 한다. 기본 실행은:
+
+```bash
+RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=30 \
+  ros2 launch ffw_bringup ffw_sg2_follower_ai.launch.py
+```
+
+초기 position 동작을 생략해야 하는 환경에서는:
+
+```bash
+RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=30 \
+  ros2 launch ffw_bringup ffw_sg2_follower_ai.launch.py init_position:=false
+```
+
+중복 follower/VR controller를 동시에 실행하지 않는다.
+
+### 6. 권장 시작 순서
+
+```text
+1. AI Worker 전원 및 네트워크 확인
+2. AI Worker follower 실행
+3. 기존 VR controller / Vuer 중복 프로세스가 없는지 확인
+4. PC controller_pc.sh / hand_original_pc.sh / hand_neck_pc.sh 실행
+5. READY 확인
+6. Robot VR controller 실행
+7. Quest 페이지 새로고침 → VR 진입
+8. tracking 확인
+9. Controller: X+A / Hand: pinch + 반대손 fist 3초
+10. 낮은 속도·작은 범위에서 동작 검증
+```
+
+---
+
 ## 저장소 구성
 
 | 브랜치 | 역할 |
