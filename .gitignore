@@ -534,3 +534,10 @@ doc/
 
 **/key.pem
 **/cert.pem
+
+# Local Quest runtime data and trust material
+/docker/workspace/
+**/teleop_logs/
+*.pem
+*.key
+.env.*

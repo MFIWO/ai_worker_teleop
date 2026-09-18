@@ -20,6 +20,7 @@ import asyncio
 import os
 import socket
 import threading
+import time
 
 from geometry_msgs.msg import Point, PoseStamped, Quaternion, Twist
 import nest_asyncio
@@ -92,10 +93,8 @@ class VRTrajectoryPublisher(Node):
         self.declare_parameter('right_shoulder_offset_x', 0.0)
         self.declare_parameter('right_shoulder_offset_y', 0.0)
         self.declare_parameter('right_shoulder_offset_z', EYE_NECK_OFFSET_Z)
-        self.declare_parameter('goal_pose_squeeze_threshold', 0.8)
-
         # VR publishing control flag
-        self.vr_publishing_enabled = True  # Default: disabled
+        self.vr_publishing_enabled = True
 
         # VR Server setup
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -127,6 +126,13 @@ class VRTrajectoryPublisher(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
+        # Older VR controllers subscribe to raw gripper commands with reliable
+        # QoS. Reliable publishers also support newer best-effort subscribers.
+        self.gripper_command_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
 
         # Publishers
         self.head_joint_pub = self.create_publisher(
@@ -151,13 +157,13 @@ class VRTrajectoryPublisher(Node):
             JointTrajectory,
             '/leader/joint_trajectory_command_broadcaster_left/'
             'raw_joint_trajectory',
-            self.vr_stream_qos
+            self.gripper_command_qos
         )
         self.right_gripper_pub = self.create_publisher(
             JointTrajectory,
             '/leader/joint_trajectory_command_broadcaster_right/'
             'raw_joint_trajectory',
-            self.vr_stream_qos
+            self.gripper_command_qos
         )
         self.cmd_vel_pub = self.create_publisher(
             Twist, '/cmd_vel', self.vr_stream_qos
@@ -190,6 +196,13 @@ class VRTrajectoryPublisher(Node):
         self.both_a_buttons_pressed_prev = False
         self.both_b_buttons_pressed_prev = False
         self.last_reactivate_state = None
+        self.arm_control_enabled = False
+        self.arm_start_armed = False
+        self.arm_activation_lock = threading.RLock()
+        self.arm_tracking_timeout_sec = 0.5
+        self.last_body_pose_sec = None
+        self.last_controller_pose_sec = {'left': None, 'right': None}
+        self.arm_tracking_timer = self.create_timer(0.05, self._check_arm_tracking_timeout)
 
         self.joint_states_sub = self.create_subscription(
             JointState,
@@ -211,9 +224,6 @@ class VRTrajectoryPublisher(Node):
         self.right_controller_state = {}
         self.left_squeeze_value = 0.0
         self.right_squeeze_value = 0.0
-        self.goal_pose_squeeze_threshold = float(
-            self.get_parameter('goal_pose_squeeze_threshold').value
-        )
         self.head_transform_matrix = np.eye(4)
         self.head_inverse_matrix = np.eye(4)
         self.vr_head_to_ros_rot = R.from_matrix(VR_HEAD_TO_ROS)
@@ -400,8 +410,9 @@ class VRTrajectoryPublisher(Node):
 
         self.get_logger().info('VR Trajectory Publisher node has been started')
         self.get_logger().info(
-            'VR publishing is DISABLED by default. '
-            'Send /vr_control/toggle message (True=enable, False=disable).'
+            'Arm teleop starts inactive. X+A starts and latches arm tracking; '
+            'Y+B stops it. Grip is not required. Tracking loss stops arm teleop '
+            'and requires releasing X/A before starting again.'
         )
         self.get_logger().info(
             f'Stick swap config: left_stick_swap_xy={self.left_stick_swap_xy}, '
@@ -464,12 +475,58 @@ class VRTrajectoryPublisher(Node):
             )
         self.last_reactivate_state = msg.data
 
-    def _both_squeezes_active(self):
-        """Return True while both squeeze inputs stay above threshold."""
-        return (
-            self.left_squeeze_value >= self.goal_pose_squeeze_threshold
-            and self.right_squeeze_value >= self.goal_pose_squeeze_threshold
-        )
+    def _arm_tracking_is_fresh(self, now=None):
+        """Require current body and both controller poses before arm output."""
+        now = time.monotonic() if now is None else now
+        times = [self.last_body_pose_sec, *self.last_controller_pose_sec.values()]
+        return all(t is not None and 0.0 <= now - t <= self.arm_tracking_timeout_sec
+                   for t in times)
+
+    def _set_arm_control_enabled(self, enabled, reason):
+        """Latch arm activation and inform the robot controller."""
+        self.arm_control_enabled = bool(enabled)
+        if not enabled:
+            self.pending_body_pose_frame = False
+            self.pending_controller_pose_frame = False
+        self._publish_reactivate(enabled, reason=reason, force_log=True)
+
+    def _check_arm_tracking_timeout(self):
+        """Release the latch on tracking loss; reconnecting cannot resume it."""
+        with self.arm_activation_lock:
+            if not self._arm_tracking_is_fresh():
+                self.arm_start_armed = False
+                if self.arm_control_enabled:
+                    self._set_arm_control_enabled(False, 'tracking timeout')
+
+    def _update_arm_activation(self):
+        """X+A starts, Y+B stops; button and Grip release preserve activation."""
+        with self.arm_activation_lock:
+            left = self.left_controller_state
+            right = self.right_controller_state
+            left_a = bool(left.get('aButton', False))
+            right_a = bool(right.get('aButton', False))
+            both_a = left_a and right_a
+            both_b = bool(left.get('bButton', False)) and bool(right.get('bButton', False))
+            fresh = self._arm_tracking_is_fresh()
+            if not fresh:
+                self.arm_start_armed = False
+                if self.arm_control_enabled:
+                    self._set_arm_control_enabled(False, 'tracking unavailable')
+            elif left and right and not left_a and not right_a:
+                self.arm_start_armed = True
+
+            # Stop wins if the start and stop chords are pressed together.
+            if both_b:
+                if not self.both_b_buttons_pressed_prev or self.arm_control_enabled:
+                    self._set_arm_control_enabled(False, 'Y+B buttons')
+                self.arm_start_armed = False
+            elif (fresh and self.arm_start_armed and both_a
+                  and not self.both_a_buttons_pressed_prev):
+                self._set_arm_control_enabled(True, 'X+A buttons')
+                self.arm_start_armed = False
+
+            self.both_a_buttons_pressed_prev = both_a
+            self.both_b_buttons_pressed_prev = both_b
 
     def apply_deadzone(self, value):
         """Apply deadzone to thumbstick value."""
@@ -591,11 +648,10 @@ class VRTrajectoryPublisher(Node):
         return ros_pos, ros_rotation.as_quat()
 
     def can_publish_goal_pose(self):
-        """Safety gate for goal_pose topics."""
+        """Publish arm poses while the button latch and tracking are valid."""
         return (
             self.vr_publishing_enabled and
-            self.left_squeeze_value >= self.goal_pose_squeeze_threshold and
-            self.right_squeeze_value >= self.goal_pose_squeeze_threshold
+            self.arm_control_enabled and self._arm_tracking_is_fresh()
         )
 
     def apply_wrist_offsets(self, side, position_ros, rotation_ros):
@@ -1238,6 +1294,11 @@ class VRTrajectoryPublisher(Node):
             self.right_shoulder_matrix = self.get_body_joint_matrix_from_flat(
                 body_array, BODY_RIGHT_SHOULDER_INDEX
             )
+            if any(matrix is None for matrix in (
+                    self.left_elbow_matrix, self.left_shoulder_matrix,
+                    self.right_elbow_matrix, self.right_shoulder_matrix)):
+                return
+            self.last_body_pose_sec = time.monotonic()
             self.pending_body_pose_frame = True
             self._publish_synced_pose_frame_if_ready()
 
@@ -1282,6 +1343,7 @@ class VRTrajectoryPublisher(Node):
 
                     self.left_gripper_pub.publish(left_gripper_msg)
             else:
+                self.left_controller_state = {}
                 self.left_squeeze_value = 0.0
 
             right_state = data.get('rightState')
@@ -1312,58 +1374,29 @@ class VRTrajectoryPublisher(Node):
 
                     self.right_gripper_pub.publish(right_gripper_msg)
             else:
+                self.right_controller_state = {}
                 self.right_squeeze_value = 0.0
 
             # Process thumbstick for lift/head/cmd_vel control.
             self.process_thumbstick()
 
-            # Publish reactivate when both A or both B buttons are pressed
-            # (rising edge only).
-            left_a = (
-                bool(self.left_controller_state.get('aButton', False))
-                if isinstance(self.left_controller_state, dict) else False
-            )
-            right_a = (
-                bool(self.right_controller_state.get('aButton', False))
-                if isinstance(self.right_controller_state, dict) else False
-            )
-            both_a_now = left_a and right_a
-            if both_a_now and not self.both_a_buttons_pressed_prev:
-                self._publish_reactivate(True, reason='both A buttons', force_log=True)
-            self.both_a_buttons_pressed_prev = both_a_now
+            controller_pose_updated = False
+            now = time.monotonic()
+            for side in ('left', 'right'):
+                raw = data.get(side)
+                state = getattr(self, f'{side}_controller_state')
+                if not state or not isinstance(raw, (list, np.ndarray)) or len(raw) != 16:
+                    continue
+                matrix = np.asarray(raw, dtype=np.float64).reshape(4, 4, order='F')
+                if (not np.all(np.isfinite(matrix))
+                        or abs(float(np.linalg.det(matrix[:3, :3]))) < 1e-6):
+                    continue
+                setattr(self, f'{side}_controller_matrix', matrix)
+                self.last_controller_pose_sec[side] = now
+                controller_pose_updated = True
 
-            left_b = (
-                bool(self.left_controller_state.get('bButton', False))
-                if isinstance(self.left_controller_state, dict) else False
-            )
-            right_b = (
-                bool(self.right_controller_state.get('bButton', False))
-                if isinstance(self.right_controller_state, dict) else False
-            )
-            both_b_now = left_b and right_b
-            if both_b_now and not self.both_b_buttons_pressed_prev:
-                self._publish_reactivate(False, reason='both B buttons', force_log=True)
-            self.both_b_buttons_pressed_prev = both_b_now
-
-            if not self._both_squeezes_active():
-                self._publish_reactivate(False, reason='squeeze released')
-
-            left_matrix_raw = data.get('left')
-            if isinstance(left_matrix_raw, (list, np.ndarray)) and len(left_matrix_raw) == 16:
-                self.left_controller_matrix = np.asarray(
-                    left_matrix_raw, dtype=np.float64
-                ).reshape(4, 4, order='F')
-
-            right_matrix_raw = data.get('right')
-            if isinstance(right_matrix_raw, (list, np.ndarray)) and len(right_matrix_raw) == 16:
-                self.right_controller_matrix = np.asarray(
-                    right_matrix_raw, dtype=np.float64
-                ).reshape(4, 4, order='F')
-            if (
-                isinstance(left_matrix_raw, (list, np.ndarray)) and len(left_matrix_raw) == 16
-            ) or (
-                isinstance(right_matrix_raw, (list, np.ndarray)) and len(right_matrix_raw) == 16
-            ):
+            self._update_arm_activation()
+            if controller_pose_updated:
                 self.pending_controller_pose_frame = True
                 self._publish_synced_pose_frame_if_ready()
 
@@ -1396,6 +1429,7 @@ class VRTrajectoryPublisher(Node):
                     f'left_trigger_raw={l_trg_raw:.3f}, right_trigger_raw={r_trg_raw:.3f}, '
                     f'left_trigger={l_trg:.3f}, right_trigger={r_trg:.3f}, '
                     f'left_stick={l_stick}, right_stick={r_stick}, '
+                    f'arm_active={self.arm_control_enabled}, '
                     f'mode={"LIFT+HEAD" if self.joystick_mode else "LIFT+CMD_VEL"}'
                 )
 

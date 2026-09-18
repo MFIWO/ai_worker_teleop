@@ -1,3 +1,7 @@
+# AI Worker Quest customizations
+
+See [QUEST_TELEOP.md](QUEST_TELEOP.md) for this branch and the matching robot setup.
+
 # robotis_applications
 
 ROS Packages for Robotis Applications
