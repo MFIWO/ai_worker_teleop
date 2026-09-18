@@ -234,6 +234,7 @@ PC 소스는 기존 컨테이너의 `/root/ros2_ws/src/robotis_applications`에 
 인증서와 개인 키는 포함하지 않는다. Quest가 접근하는 현재 서버 IP를 포함해
 인증서를 별도로 생성하고 기기의 신뢰 설정을 완료해야 한다.
 
+- U 정지·수동 이동·Loop A/B/C 통합 터미널: [OPERATOR_CONSOLE.md](OPERATOR_CONSOLE.md)
 - 원본 optical hand 비교: [HAND_ORIGINAL.md](HAND_ORIGINAL.md)
 - 목 착용 optical hand: [HAND_NECK.md](HAND_NECK.md)
 - VR 팔 action과 카메라 기록: [loop/VR_LOOP.md](loop/VR_LOOP.md)

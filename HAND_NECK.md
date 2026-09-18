@@ -94,3 +94,9 @@ hand_neck_pc.sh → READY → hand_original_robot.sh 순서로 다시 시작한�
 격리 ROS domain 231에서 실제 hand/body callback 전체 경로 테스트 1개 통과.
 사용자 로그의 16.3cm/13.3cm 급변은 보류되는 것을 모의 검증했다.
 실제 시야 밖 손 추적 여부와 복구 동작은 사용자의 다음 teleop에서 검증해야 한다.
+
+## 통합 조작 터미널 (2026-09-19)
+
+PC hand 실행 스크립트에 U 일시정지 래퍼를 연결했다. 원본 SH5 소스와 좌표 수식은
+유지하며, 비활성 손에 0을 보내는 대신 마지막 목표를 유지한다.
+실행 및 키 배치는 [OPERATOR_CONSOLE.md](OPERATOR_CONSOLE.md)를 따른다.

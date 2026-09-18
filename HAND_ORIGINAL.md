@@ -95,3 +95,9 @@ bash /root/ros2_ws/src/robotis_applications/log_vr_pc.sh --seconds 60
 수신된 reactivate 이벤트를 저장한다. 최신값 묶음을 약 10Hz로 기록하고 수신 시각/나이를 포함한다.
 하드웨어 동기화나 모든 원본 메시지를 기록하는 rosbag은 아니다.
 터미널은 1초마다 수신 상태와 VR 좌표를 표시하고, 로봇 어깨 FK 및 목표 오차 분석은 저장 파일로 수행한다.
+
+## 통합 조작 터미널 (2026-09-19)
+
+PC hand 실행 스크립트에 U 일시정지 래퍼를 연결했다. 원본 SH5 소스와 좌표 수식은
+유지하며, 비활성 손에 0을 보내는 대신 마지막 목표를 유지한다.
+실행 및 키 배치는 [OPERATOR_CONSOLE.md](OPERATOR_CONSOLE.md)를 따른다.
