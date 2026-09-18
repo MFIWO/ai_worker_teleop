@@ -1,0 +1,41 @@
+# VR actions are final commanded joint angles, not wrist poses or measured state.
+# Keep arm and gripper channels separate: a missing gripper must not erase the arm.
+# The original ffw_sg2_rev1 leader profile remains unchanged.
+/**:
+  ros__parameters:
+    ffw_sg2_vr:
+      observation_list: [cam_head, cam_wrist_left, cam_wrist_right, state]
+      camera_topic_list:
+        - cam_head:/zed/zed_node/left/image_rect_color/compressed
+        - cam_wrist_left:/camera_left/camera_left/color/image_rect_raw/compressed
+        - cam_wrist_right:/camera_right/camera_right/color/image_rect_raw/compressed
+      joint_topic_list:
+        - follower_upper_body:/joint_states
+        - leader_left_arm:/leader/joint_trajectory_command_broadcaster_left/joint_trajectory
+        - leader_right_arm:/leader/joint_trajectory_command_broadcaster_right/joint_trajectory
+        - leader_left_gripper:/leader/joint_trajectory_command_broadcaster_left/joint_trajectory
+        - leader_right_gripper:/leader/joint_trajectory_command_broadcaster_right/joint_trajectory
+      joint_list:
+        - leader_left_arm
+        - leader_right_arm
+        - leader_left_gripper
+        - leader_right_gripper
+      joint_order:
+        leader_left_arm:
+          - arm_l_joint1
+          - arm_l_joint2
+          - arm_l_joint3
+          - arm_l_joint4
+          - arm_l_joint5
+          - arm_l_joint6
+          - arm_l_joint7
+        leader_right_arm:
+          - arm_r_joint1
+          - arm_r_joint2
+          - arm_r_joint3
+          - arm_r_joint4
+          - arm_r_joint5
+          - arm_r_joint6
+          - arm_r_joint7
+        leader_left_gripper: [gripper_l_joint1]
+        leader_right_gripper: [gripper_r_joint1]
