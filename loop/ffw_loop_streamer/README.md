@@ -37,13 +37,17 @@ When launching by hand: `export PYTHONPATH=/opt/venv/lib/python3.12/site-package
 (the console script's shebang is `/usr/bin/python3`).
 
 ## Tests
-`cd ~/ai_worker/ffw_loop_streamer && python3 -m pytest -q test/test_loop_streamer.py` (17 offline tests).
+`cd ~/ai_worker/ffw_loop_streamer && python3 -m pytest -q test/test_loop_streamer.py`.
 Smoke test without ROS: `python3 -m ffw_loop_streamer.loop_streamer --loop-addr <loop-host>:50051`.
 
 ## Notes
 - Cameras: the node waits `camera_probe_timeout` (120 s) for the first frame of each camera, then
   streams without the missing ones for the rest of its life. Start cameras first or restart the streamer.
 - RTSP server speaks RTP/AVP/TCP (interleaved) only; `ffplay -rtsp_transport tcp rtsp://<robot>:8554/cam_head`.
+- The head camera is recompressed to JPEG quality 75 by default before RTSP transmission. This makes
+  `jpeg_quality` effective even when the ROS `CompressedImage` is already RTP/JPEG-compatible (the old
+  pass-through path ignored it). Set `jpeg_recompress_cameras:=` for zero-copy pass-through, or list
+  additional comma-separated camera names. Wrist cameras are already re-encoded while being rotated.
 - Adding a hand (e.g. Inspire): add `hand_left`/`hand_right` entries to `joint_topic_list`, `joint_list`
   and `joint_order` in the config; channels appear automatically.
 

@@ -1,5 +1,37 @@
 # AI Worker Quest → Config Loop 연결 및 ZED Mini 압축 조사
 
+## JPEG 재압축 후속 적용 (2026-09-22)
+
+`ffw-SNPR48A1111.local` 및 PC의 Loop Desktop 1.1.4 구성에 다음을 적용했다.
+
+- 기존 streamer는 RTP/JPEG 호환 프레임을 그대로 통과시켜 `jpeg_quality`가 head
+  전송량에 영향을 주지 않았다. 수정본은 기본으로 `cam_head`를 품질 75로
+  재인코딩한 뒤 RTSP/RTP-JPEG로 보낸다.
+- `jpeg_recompress_cameras`(기본 `cam_head`)와 `jpeg_quality`(기본 `75`)로 대상과 품질을
+  조정한다. 빈 문자열이면 기존 pass-through 동작으로 복귀한다.
+- 손목 카메라는 기존 `camera_rotation`/`rotated_jpeg_quality` 회전·재인코딩 경로를
+  보존했고 기본 재압축 대상에서 제외해 이중 재인코딩하지 않는다.
+- 외부 저장소의 병합본은 PC
+  `/home/kimm/Config/robotis-loop-integration`에 별도 배치했다. Loop Desktop 바이너는
+  `/opt/Loop/Loop`에 있으며 이 통합 코드는 로봇에서 실행된다.
+- 로봇 `/home/robotis/ai_worker/ffw_loop_streamer`에 병합하고 ROS 2 패키지를 다시
+  빌드했다. 적용 전 전체 백업은
+  `/home/robotis/ai_worker/docker/workspace/loop_backups/ffw_loop_streamer.before_jpeg_recompress_20260922.tar.gz`이다.
+- PC의 오프라인 환경에서 29개가 통과하고 `loop_sdk` 연동 2개가 skip됐다.
+  로봇의 실제 `loop-sdk==0.4.1` 환경에서는 **31개 전체 테스트가 통과**했다.
+  로봇의 1280×720 합성 노이즈 프레임
+  q95→q75 벤치마크는 1,081,528→498,774 bytes(-53.9%), 평균 24.9ms였다.
+- 현재 PC의 로봇망 주소는 `192.168.6.55`이며 Loop Desktop이 `*:50051`에서 수신 중이다.
+  로봇에서 `192.168.6.55:50051` TCP 연결을 확인했다.
+- 대상 `ffw-SNPR48A1111`의
+  `/home/robotis/ai_worker/ffw_bringup/config/common/zedm.yaml` 설정을 VGA에서
+  **HD720**으로 변경했다. 백업은 같은 디렉터리의
+  `zedm.yaml.before_hd720_20260922.bak`이다. ZED만 임시 실행해 `HD720@30`,
+  `CameraInfo 1280×720`을 확인한 뒤 검증 프로세스를 종료했다.
+- 아래 상세 HD720 실측값과 JPEG 크기는 별도 `ffw-SNPR48A1112` 작업 기록이다.
+
+## 이전 HD720 적용 기록 (`ffw-SNPR48A1112`)
+
 **후속 적용 완료 — 사용자 요청으로 head cam을 1280×720으로 변경했다.**
 
 - 로봇 호스트 `/home/robotis/ai_worker/ffw_bringup/config/common/zedm.yaml`에서
@@ -57,14 +89,14 @@ Loop UI를 로봇에 설치할 필요는 없다. ZED의 head 영상 경로는 �
 | 로봇에 있는 profile | `ffw_sg2_rev1`, `ffw_bg2_rev4` |
 | 아직 없는 profile | 로컬에 있는 `ffw_sg2_vr` |
 | 기존 Loop 주소 | `192.168.6.56:50051` |
-| 현재 작업 PC 로봇망 IP | `192.168.6.5` |
-| 연결 검사 | 로봇→`.6.5:50051`: connection refused, `.6.56:50051`: timeout |
+| 현재 작업 PC 로봇망 IP | `192.168.6.55` |
+| 연결 검사 | 최초 조사 당시 `.6.5:50051`: connection refused, `.6.56:50051`: timeout |
 | 실행 상태 | 조사 당시 ZED/VR/Loop streamer 프로세스 없음; ROS domain 30 노드 목록 비어 있음 |
 
 Loop 서버를 실제로 실행하는 PC의 주소를 사용해야 한다. 아래 예시는 현재 PC인
-`192.168.6.5`를 사용한다. `.6.56`이나 다른 PC에서 녹화한다면 주소를 바꾼다.
-현재 PC에서는 50051 수신 포트가 발견되지 않았으므로 Loop 서버 실행 및 외부 접속 설정을
-먼저 확인해야 한다. 이 결과만으로 Loop 앱의 설치 여부까지 판단하지는 않았다.
+`192.168.6.55`를 사용한다. `.6.56`이나 다른 PC에서 녹화한다면 주소를 바꾼다.
+최초 조사 당시에는 50051 수신 포트가 발견되지 않았다. 현재는 위 JPEG
+재압축 후속 적용에 기록한 것처럼 `.6.55:50051`에서 수신·연결을 확인했다.
 
 ## 2. 어디에 연결하는가
 
@@ -127,7 +159,7 @@ ros2 run ffw_loop_streamer loop_streamer --ros-args \
   --params-file /workspace/loop_vr_20260922/ffw_sg2_vr.yaml \
   -p robot_type:=ffw_sg2_vr \
   -p source_key:=robotis-vr \
-  -p loop_addr:=192.168.6.5:50051 \
+  -p loop_addr:=192.168.6.55:50051 \
   -p fps:=30.0 \
   -p camera_probe_timeout_s:=120.0 \
   -p rtsp_advertise_host:=192.168.6.2
@@ -184,9 +216,10 @@ ZED → image_transport JPEG → /zed/zed_node/left/image_rect_color/compressed
     → Loop streamer set_jpeg → JPEG 파싱·RTP 패킷화 → RTSP/TCP → Loop
 ```
 
-Head JPEG가 RTP/JPEG와 호환되면 디코딩·재인코딩 없이 전달한다.
-따라서 Loop node의 `jpeg_quality=80`을 낮춰도 이 head 경로의 전송량은 줄어들지 않는다.
-그 값은 비호환 JPEG의 재인코딩 등 fallback에 쓰인다. 손목은 회전을 위해 재인코딩한다.
+Head JPEG가 RTP/JPEG와 호환되면 원래 코드는 디코딩·재인코딩 없이 전달했다.
+따라서 기존 Loop node의 `jpeg_quality=80`을 낮춰도 head 전송량이 줄지 않았다.
+위 JPEG 재압축 후속 적용으로 현재는 `cam_head`를 q75로 재인코딩하며, 손목은
+회전 과정의 별도 `rotated_jpeg_quality`를 사용한다.
 
 설치된 `compressed_image_transport`는 4.0.6이다. 같은 버전의 공식 소스에서
 JPEG 기본 품질 95와 토픽별 `compressed.jpeg_quality` 파라미터를 확인했다.

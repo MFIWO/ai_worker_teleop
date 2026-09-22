@@ -52,7 +52,9 @@ from ffw_loop_streamer.loop_streamer import (
     jpeg_dimensions,
     LoopCameraStreamer,
     LoopRobotStreamer,
+    parse_camera_rotation,
     RobotStepMapper,
+    rotate_jpeg,
 )
 from ffw_loop_streamer.param_utils import (
     declare_parameters,
@@ -83,7 +85,10 @@ class LoopStreamerNode(Node):
         self.declare_parameter('enable_camera', True)
         self.declare_parameter('rtsp_advertise_host', '')
         self.declare_parameter('rtsp_base_port', DEFAULT_RTSP_BASE_PORT)
-        self.declare_parameter('jpeg_quality', 80)
+        self.declare_parameter('jpeg_quality', 75)
+        self.declare_parameter('jpeg_recompress_cameras', 'cam_head')
+        self.declare_parameter('camera_rotation', 'cam_wrist_left:90,cam_wrist_right:90')
+        self.declare_parameter('rotated_jpeg_quality', 90)
         self.declare_parameter('camera_probe_timeout_s', 10.0)
         self.declare_parameter('connect_timeout_s', 5.0)
 
@@ -95,6 +100,19 @@ class LoopStreamerNode(Node):
         if self.fps <= 0:
             raise ValueError("parameter 'fps' must be positive")
         self.enable_camera: bool = bool(self.get_parameter('enable_camera').value)
+        self.jpeg_quality = int(self.get_parameter('jpeg_quality').value)
+        if not 1 <= self.jpeg_quality <= 100:
+            raise ValueError("parameter 'jpeg_quality' must be 1..100")
+        self.jpeg_recompress_cameras = tuple(
+            name.strip() for name in
+            str(self.get_parameter('jpeg_recompress_cameras').value).split(',')
+            if name.strip())
+        self.camera_rotation: Dict[str, int] = parse_camera_rotation(
+            str(self.get_parameter('camera_rotation').value))
+        self.rotated_jpeg_quality = int(self.get_parameter('rotated_jpeg_quality').value)
+        if not 1 <= self.rotated_jpeg_quality <= 100:
+            raise ValueError("parameter 'rotated_jpeg_quality' must be 1..100")
+        self._rotation_failed_once: Dict[str, bool] = {}
         self.camera_probe_timeout_s = float(self.get_parameter('camera_probe_timeout_s').value)
         self.connect_timeout_s = float(self.get_parameter('connect_timeout_s').value)
 
@@ -164,7 +182,14 @@ class LoopStreamerNode(Node):
             self._camera_msgs[name] = None
             self.create_subscription(
                 CompressedImage, topic, partial(self._camera_callback, name), self._qos)
-            self.get_logger().info(f'subscribed camera {name} -> {topic}')
+            details = []
+            if name in self.camera_rotation:
+                details.append(
+                    f'rotate {self.camera_rotation[name]} deg CCW q{self.rotated_jpeg_quality}')
+            if name in self.jpeg_recompress_cameras:
+                details.append(f'recompress q{self.jpeg_quality}')
+            suffix = f" ({', '.join(details)})" if details else ' (JPEG pass-through)'
+            self.get_logger().info(f'subscribed camera {name} -> {topic}{suffix}')
 
         for name, topic in self.joint_topics.items():
             lowered = name.lower()
@@ -194,35 +219,20 @@ class LoopStreamerNode(Node):
 
     # -------------------------------------------------------------- callbacks
     def _camera_callback(self, name: str, msg: CompressedImage) -> None:
-        if name in ('cam_wrist_left', 'cam_wrist_right'):
-            # Rotate before caching: Loop probes the first frame for its size.
+        degrees = self.camera_rotation.get(name, 0)
+        if degrees:
             try:
-                import cv2
-                import numpy as np
-
-                image = cv2.imdecode(
-                    np.frombuffer(bytes(msg.data), dtype=np.uint8),
-                    cv2.IMREAD_COLOR,
-                )
-                if image is None:
-                    raise ValueError('could not decode wrist camera image')
-                image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                ok, encoded = cv2.imencode(
-                    '.jpg', image,
-                    [cv2.IMWRITE_JPEG_QUALITY, int(self.get_parameter('jpeg_quality').value)],
-                )
-                if not ok:
-                    raise ValueError('could not encode rotated wrist camera image')
-                rotated_msg = CompressedImage()
-                rotated_msg.header = msg.header
-                rotated_msg.format = 'jpeg'
-                rotated_msg.data = encoded.tobytes()
-                msg = rotated_msg
+                rotated = CompressedImage()
+                rotated.header = msg.header
+                rotated.format = msg.format
+                rotated.data = rotate_jpeg(msg.data, degrees, self.rotated_jpeg_quality)
+                msg = rotated
             except Exception as error:
-                self.get_logger().warning(
-                    f'skipping wrist camera frame {name}: {error}',
-                    throttle_duration_sec=self.LOG_THROTTLE_S,
-                )
+                if not self._rotation_failed_once.get(name):
+                    self.get_logger().warning(
+                        f"camera '{name}': rotation by {degrees} deg failed, frame dropped: "
+                        f'{error}')
+                    self._rotation_failed_once[name] = True
                 return
         self._camera_msgs[name] = msg
         if self.camera_streamer is not None:
@@ -278,7 +288,8 @@ class LoopStreamerNode(Node):
             fps=self.fps,
             advertise_host=self.get_parameter('rtsp_advertise_host').value or None,
             base_port=int(self.get_parameter('rtsp_base_port').value),
-            jpeg_quality=int(self.get_parameter('jpeg_quality').value),
+            jpeg_quality=self.jpeg_quality,
+            recompress_cameras=self.jpeg_recompress_cameras,
             connect_timeout_s=self.connect_timeout_s,
             client_id_prefix=f'physical-ai-{self.robot_type}',
         )

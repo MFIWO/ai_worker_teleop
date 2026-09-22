@@ -31,10 +31,10 @@ Why an RTSP server at all? loop-sdk has no ``send_camera_frame()`` API: Loop
 pulls camera media from an RTSP/RTP endpoint and the SDK only advertises where.
 The RTP/JPEG packetization and RTSP request handling below are VENDORED from the
 loop-sdk e2e fixture (``loop-sdk/e2e/send_simulated_sources.py``), the only
-camera transport proven to interoperate with Loop; the only change is the frame
-source: the fixture loops a fixed frame list, this server sends the latest live
-frame. ``CompressedImage`` topics already carry JPEG bytes, so frames are
-packetized directly without a decode / re-encode round trip.
+camera transport proven to interoperate with Loop; the frame source is the latest
+live frame instead of the fixture's fixed list. Compatible ``CompressedImage``
+frames normally use the direct packetization path. Selected high-bandwidth cameras
+can instead be decoded and re-encoded at a configured quality before packetization.
 
 Threading / data flow (cameras)::
 
@@ -42,7 +42,7 @@ Threading / data flow (cameras)::
     -------------------                         ------------------
     CompressedImage.data --set_jpeg()-->  [latest raw slot, lock]
                                               |  (per-camera encoder thread)
-                                              v  parse_jpeg_for_rtp / cv2 fallback
+                                              v  parse_jpeg_for_rtp / selected cv2 recompression
                                         [latest JpegRtpFrame slot, lock]
                                               |  RtspLiveServer (camera fps, asyncio)
                                               v
@@ -481,6 +481,58 @@ def jpeg_dimensions(jpeg: bytes) -> Tuple[int, int]:
             break
         offset += segment_length
     raise ValueError('JPEG frame is missing a frame header')
+
+
+_ROTATE_CODES = {
+    90: 'ROTATE_90_COUNTERCLOCKWISE',
+    180: 'ROTATE_180',
+    270: 'ROTATE_90_CLOCKWISE',
+}
+
+
+def parse_camera_rotation(spec: str) -> Dict[str, int]:
+    """Parse ``<camera>:<degrees CCW>,...`` camera rotation settings."""
+    result: Dict[str, int] = {}
+    for item in (spec or '').split(','):
+        item = item.strip()
+        if not item:
+            continue
+        name, separator, degrees = item.rpartition(':')
+        if not separator or not name.strip():
+            raise ValueError(f'camera_rotation item {item!r} must look like <camera>:<degrees>')
+        try:
+            value = int(degrees) % 360
+        except ValueError as error:
+            raise ValueError(
+                f'camera_rotation item {item!r}: degrees must be an integer') from error
+        if value not in (0, 90, 180, 270):
+            raise ValueError(
+                f'camera_rotation item {item!r}: degrees must be 0, 90, 180 or 270')
+        if value:
+            result[name.strip()] = value
+    return result
+
+
+def rotate_jpeg(jpeg: bytes, degrees: int, quality: int = 90) -> bytes:
+    """Rotate a JPEG counter-clockwise and re-encode it at ``quality``."""
+    degrees = int(degrees) % 360
+    if degrees == 0:
+        return jpeg
+    if degrees not in _ROTATE_CODES:
+        raise ValueError('rotation must be 0, 90, 180 or 270 degrees')
+    if not 1 <= int(quality) <= 100:
+        raise ValueError('JPEG quality must be 1..100')
+    import cv2
+    import numpy as np
+    image = cv2.imdecode(np.frombuffer(bytes(jpeg), dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError('could not decode the camera JPEG')
+    rotated = cv2.rotate(image, getattr(cv2, _ROTATE_CODES[degrees]))
+    ok, encoded = cv2.imencode(
+        '.jpg', rotated, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+    if not ok:
+        raise ValueError('could not encode the rotated JPEG')
+    return encoded.tobytes()
 
 
 def parse_jpeg_for_rtp(jpeg: bytes) -> JpegRtpFrame:
@@ -966,6 +1018,7 @@ class _CameraChannel:
     width: int
     height: int
     fps: float
+    recompress_jpeg: bool = False
     raw: _RawSlot = field(default_factory=_RawSlot)
     latest: LatestFrame = field(default_factory=LatestFrame)
     producer: object = None  # loop_sdk.SourceProducer
@@ -986,8 +1039,10 @@ class LoopCameraStreamer:
         streamer.set_jpeg('cam_head', data)    # from each CompressedImage callback
         streamer.close()                       # in finally
 
-    One monocular RTSP source per camera. ``CompressedImage`` JPEG bytes are
-    packetized directly (no decode); anything else is re-encoded with OpenCV.
+    One monocular RTSP source per camera. ``CompressedImage`` JPEG bytes normally
+    use a zero-copy-compatible pass-through path. Cameras listed in
+    ``recompress_cameras`` are decoded and re-encoded at ``jpeg_quality`` before
+    packetization to cap bandwidth from high-quality publishers.
     """
 
     def __init__(
@@ -999,18 +1054,23 @@ class LoopCameraStreamer:
         advertise_host: Optional[str] = None,
         listen_host: str = DEFAULT_LISTEN_HOST,
         base_port: int = DEFAULT_RTSP_BASE_PORT,
-        jpeg_quality: int = 80,
+        jpeg_quality: int = 75,
+        recompress_cameras: Sequence[str] = (),
         connect_timeout_s: float = 5.0,
         client_id_prefix: str = 'physical-ai',
     ) -> None:
         if fps <= 0:
             raise ValueError('fps must be positive')
+        if not 1 <= int(jpeg_quality) <= 100:
+            raise ValueError('jpeg_quality must be 1..100')
         self._loop_addr = loop_addr
         self._fps = float(fps)
         self._advertise_host = advertise_host or detect_advertise_host(loop_addr)
         self._listen_host = listen_host
         self._base_port = int(base_port)
         self._jpeg_quality = int(jpeg_quality)
+        self._recompress_cameras = frozenset(
+            str(name).strip() for name in recompress_cameras if str(name).strip())
         self._connect_timeout_s = connect_timeout_s
         self._client_id_prefix = client_id_prefix
         self._channels: Dict[str, _CameraChannel] = self._build_channels(cameras)
@@ -1026,6 +1086,10 @@ class LoopCameraStreamer:
     @property
     def camera_names(self) -> Tuple[str, ...]:
         return tuple(self._channels)
+
+    @property
+    def recompress_camera_names(self) -> Tuple[str, ...]:
+        return tuple(key for key in self._channels if self._channels[key].recompress_jpeg)
 
     def rtsp_uris(self) -> Dict[str, str]:
         return {key: ch.rtsp_uri(self._advertise_host) for key, ch in self._channels.items()}
@@ -1054,6 +1118,7 @@ class LoopCameraStreamer:
                 width=int(width),
                 height=int(height),
                 fps=self._fps,
+                recompress_jpeg=key in self._recompress_cameras,
             )
             port += 1
         return channels
@@ -1128,8 +1193,12 @@ class LoopCameraStreamer:
                     client_id=f'{self._client_id_prefix}-{ch.rtsp_path}',
                     on_camera_open=_make_open_callback(setting, uri),
                 )
-                logger.info('[loop] camera %s advertised to %s, serving %s (%dx%d @ %g fps)',
-                            ch.source_key, self._loop_addr, uri, ch.width, ch.height, ch.fps)
+                compression = (f', recompress q{self._jpeg_quality}'
+                               if ch.recompress_jpeg else ', JPEG pass-through')
+                logger.info(
+                    '[loop] camera %s advertised to %s, serving %s (%dx%d @ %g fps%s)',
+                    ch.source_key, self._loop_addr, uri, ch.width, ch.height, ch.fps,
+                    compression)
         except Exception:
             self.close()
             raise
@@ -1154,8 +1223,8 @@ class LoopCameraStreamer:
         try:
             import cv2
             import numpy
-        except Exception as error:  # cv2 is only needed for the re-encode fallback
-            logger.warning('[loop] cv2 unavailable for %s; JPEG pass-through only: %s',
+        except Exception as error:  # cv2 is only needed for re-encoding
+            logger.warning('[loop] cv2 unavailable for %s; cannot re-encode JPEG: %s',
                            ch.source_key, error)
         last_seq = 0
         warned_fallback = False
@@ -1169,8 +1238,9 @@ class LoopCameraStreamer:
                 continue
             last_seq = seq
             frame = None
-            # fast path: CompressedImage JPEG bytes are already RTP/JPEG compatible
-            if jpeg is not None:
+            # Fast path: preserve an already compatible JPEG unless bandwidth
+            # recompression was explicitly requested for this camera.
+            if jpeg is not None and not ch.recompress_jpeg:
                 try:
                     frame = parse_jpeg_for_rtp(jpeg)
                 except Exception as error:

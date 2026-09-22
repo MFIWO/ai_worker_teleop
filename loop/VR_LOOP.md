@@ -54,7 +54,7 @@ VR 설정과 launch source_key 인자만 추가하고 해당 패키지를 빌드
 RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=30 \
 ros2 launch ffw_loop_streamer loop_streamer.launch.py \
 robot_type:=ffw_sg2_vr source_key:=robotis-vr \
-loop_addr:=192.168.6.56:50051 fps:=30.0
+loop_addr:=192.168.6.55:50051 fps:=30.0
 ```
 
 Loop Recorder에서는 새 robotis-vr 소스와 기존 카메라 3대를 선택하고 30Hz로 기록한다.

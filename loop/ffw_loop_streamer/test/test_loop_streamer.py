@@ -18,6 +18,9 @@
 
 """Offline tests for the Config Loop streamer (no ROS, no Loop instance needed)."""
 
+import threading
+import time
+
 from ffw_loop_streamer.loop_streamer import (
     build_groups,
     group_label,
@@ -26,8 +29,10 @@ from ffw_loop_streamer.loop_streamer import (
     LoopRobotStreamer,
     MAX_RTP_PAYLOAD,
     mjpeg_rtp_payloads,
+    parse_camera_rotation,
     parse_jpeg_for_rtp,
     RobotStepMapper,
+    rotate_jpeg,
     rtp_header,
     RTP_PAYLOAD_TYPE,
 )
@@ -239,3 +244,78 @@ def test_camera_channels_source_keys_ports_and_uris():
     # cameras beyond the RTP/JPEG size limit are skipped, not fatal
     skipped = LoopCameraStreamer('localhost:50051', {'big': (4096, 2160)}, advertise_host='h')
     assert skipped.camera_names == ()
+
+
+def test_camera_recompression_is_per_camera_and_quality_is_validated():
+    streamer = LoopCameraStreamer(
+        'localhost:50051', {'cam_head': (1280, 720), 'cam_wrist_left': (480, 640)},
+        advertise_host='h', jpeg_quality=75, recompress_cameras=('cam_head',))
+    assert streamer.recompress_camera_names == ('cam_head',)
+    with pytest.raises(ValueError, match='jpeg_quality'):
+        LoopCameraStreamer(
+            'localhost:50051', {'cam_head': (640, 480)}, advertise_host='h', jpeg_quality=0)
+
+
+def test_requested_camera_is_actually_recompressed_before_rtp():
+    streamer = LoopCameraStreamer(
+        'localhost:50051', {'cam_head': (320, 240)}, advertise_host='h',
+        jpeg_quality=75, recompress_cameras=('cam_head',))
+    channel = streamer._channels['cam_head']
+    worker = threading.Thread(target=streamer._encode_loop, args=(channel,))
+    worker.start()
+    try:
+        input_frame = parse_jpeg_for_rtp(_jpeg(320, 240, quality=95))
+        streamer.set_jpeg('cam_head', _jpeg(320, 240, quality=95))
+        deadline = time.monotonic() + 2.0
+        output_frame = None
+        while output_frame is None and time.monotonic() < deadline:
+            output_frame = channel.latest.get()
+            time.sleep(0.01)
+        assert output_frame is not None
+        assert output_frame.quantization_tables != input_frame.quantization_tables
+        assert output_frame.quantization_tables == parse_jpeg_for_rtp(
+            _jpeg(320, 240, quality=75)).quantization_tables
+    finally:
+        streamer._stop_encoders.set()
+        worker.join(timeout=1.0)
+
+
+# ------------------------------------------------------------- camera rotation
+
+def test_parse_camera_rotation_accepts_quarter_turns_and_drops_zero():
+    assert parse_camera_rotation('cam_wrist_left:90, cam_wrist_right:270,cam_head:0') == {
+        'cam_wrist_left': 90, 'cam_wrist_right': 270}
+    assert parse_camera_rotation('') == {}
+    assert parse_camera_rotation(' , ') == {}
+
+
+@pytest.mark.parametrize('spec', ['cam_head', 'cam_head:45', 'cam_head:ninety', ':90'])
+def test_parse_camera_rotation_rejects_bad_items(spec):
+    with pytest.raises(ValueError):
+        parse_camera_rotation(spec)
+
+
+def test_rotate_jpeg_swaps_dimensions_and_stays_rtp_compatible():
+    landscape = _jpeg(424, 240)
+    portrait = rotate_jpeg(landscape, 90, quality=90)
+    assert jpeg_dimensions(portrait) == (240, 424)
+    assert jpeg_dimensions(rotate_jpeg(landscape, 270)) == (240, 424)
+    assert jpeg_dimensions(rotate_jpeg(landscape, 180)) == (424, 240)
+    frame = parse_jpeg_for_rtp(portrait)
+    assert (frame.width_blocks * 8, frame.height_blocks * 8) == (240, 424)
+
+
+def test_rotate_jpeg_orientation_is_counter_clockwise():
+    image = cv2.imdecode(
+        np.frombuffer(rotate_jpeg(_jpeg(64, 32), 90), np.uint8), cv2.IMREAD_COLOR)
+    assert image.shape[:2] == (64, 32)
+    assert image[-4:, :, 2].mean() > 200 and image[:4, :, 2].mean() < 50
+
+
+def test_rotate_jpeg_zero_is_identity_and_rejects_bad_values():
+    data = _jpeg(16, 16)
+    assert rotate_jpeg(data, 0) is data
+    with pytest.raises(ValueError):
+        rotate_jpeg(data, 45)
+    with pytest.raises(ValueError, match='quality'):
+        rotate_jpeg(data, 90, quality=101)

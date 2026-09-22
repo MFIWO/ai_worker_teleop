@@ -40,6 +40,10 @@ def generate_launch_description():
             'camera_probe_timeout_s': LaunchConfiguration('camera_probe_timeout'),
             'rtsp_advertise_host': LaunchConfiguration('rtsp_advertise_host'),
             'rtsp_base_port': LaunchConfiguration('rtsp_base_port'),
+            'jpeg_quality': LaunchConfiguration('jpeg_quality'),
+            'jpeg_recompress_cameras': LaunchConfiguration('jpeg_recompress_cameras'),
+            'camera_rotation': LaunchConfiguration('camera_rotation'),
+            'rotated_jpeg_quality': LaunchConfiguration('rotated_jpeg_quality'),
         }],
     )
 
@@ -68,6 +72,18 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'rtsp_base_port', default_value='8554',
             description='First RTSP listen port; one port per camera'),
+        DeclareLaunchArgument(
+            'jpeg_quality', default_value='75',
+            description='JPEG quality used when a camera is recompressed before RTSP'),
+        DeclareLaunchArgument(
+            'jpeg_recompress_cameras', default_value='cam_head',
+            description='Comma-separated camera names to recompress; empty keeps JPEG pass-through'),
+        DeclareLaunchArgument(
+            'camera_rotation', default_value='cam_wrist_left:90,cam_wrist_right:90',
+            description='Cameras to rotate, "<camera>:<deg CCW>,..." (0/90/180/270)'),
+        DeclareLaunchArgument(
+            'rotated_jpeg_quality', default_value='90',
+            description='JPEG quality for re-encoding rotated camera frames'),
         DeclareLaunchArgument(
             'respawn', default_value='true',
             description='Restart the streamer every 5 s while Config Loop is unreachable'),
