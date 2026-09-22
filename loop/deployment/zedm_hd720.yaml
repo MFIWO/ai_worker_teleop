@@ -1,0 +1,17 @@
+# Candidate for ffw_bringup camera_zed.launch.py ros_params_override_path.
+# Prepared 2026-09-22; this override file itself was not deployed.
+# Follow-up: the robot's existing zedm.yaml was changed to HD720 directly,
+# and both compressed image topics were verified at 1280x720, about 30 fps.
+# JPEG quality is configured separately on the running ZED publisher.
+/**:
+  ros__parameters:
+    general:
+      grab_resolution: 'HD720'
+      grab_frame_rate: 30
+      pub_resolution: 'NATIVE'
+      pub_downscale_factor: 1.0
+      pub_frame_rate: 30.0
+    depth:
+      depth_mode: 'NONE'
+    pos_tracking:
+      pos_tracking_enabled: false
