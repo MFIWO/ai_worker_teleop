@@ -26,8 +26,10 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from hardware.xr_contract import (
     ARM_NAMES, SIDES, FOLLOWER_TOPICS, GATE_NAME, PC_NAME, LEASE_SECONDS,
-    check_positions, check_step, load_profile, private_topic, verify_description, motor_health, configured_arm_ids,
+    check_positions, check_step, load_profile, private_topic, verify_description,
+    motor_health, motor_read_health, configured_arm_ids,
 )
+from hardware.torque_evidence import TorqueEvidence
 
 
 def deployment_domain():
@@ -57,6 +59,9 @@ class HardwareCommandGate(Node):
         self.motor_stamp = -math.inf
         self.motor_ids = None
         self.motor_ok = False
+        # [ADDED] Direct read-only hardware proof; never set torque here.
+        self.torque_evidence = TorqueEvidence(self)
+        self.motor_topic_ok = False
         self.intent_rx = -math.inf
         self.intent_enabled = False
         self.enabled_since = None
@@ -138,15 +143,25 @@ class HardwareCommandGate(Node):
         if stamp <= self.motor_stamp or not -.1 <= now_ros-stamp <= .5:
             return
         ids = tuple(sorted(msg.id))
-        ok = motor_health(msg.id, msg.torque_state, msg.dxl_hw_state, msg.comm_state,
-                          self.profile['arm_dxl_ids'])
+        # [CHANGED] Keep strict bus/ID/error checks. Only a positive read of
+        # ALL real Torque Enable registers can replace unreliable False topic bits.
+        bus_ok = motor_read_health(
+            msg.id, msg.dxl_hw_state, msg.comm_state, self.profile['arm_dxl_ids'])
+        reported_ok = motor_health(
+            msg.id, msg.torque_state, msg.dxl_hw_state, msg.comm_state,
+            self.profile['arm_dxl_ids'])
         if self.motor_ids is not None and ids != self.motor_ids:
-            ok = False
+            bus_ok = False
+        real_registers_on = bus_ok and self.torque_evidence.verified()
+        ok = bool(bus_ok and (reported_ok or real_registers_on))
+        self.motor_topic_ok = bool(reported_ok)
+        if real_registers_on and not reported_ok:
+            self.torque_evidence.warning_once()
         if ok:
             self.motor_ids = ids
-        self.motor_stamp, self.motor_rx, self.motor_ok = stamp, time.monotonic(), bool(ok)
+        self.motor_stamp, self.motor_rx, self.motor_ok = stamp, time.monotonic(), ok
         if not ok and self.intent_enabled:
-            self.latch('Dynamixel communication/torque/hardware-health failure')
+            self.latch('Dynamixel bus, hardware, or verified Torque Enable health failure')
 
     def intent(self, msg):
         try:
@@ -238,7 +253,11 @@ class HardwareCommandGate(Node):
         self.fault_pub.publish(Bool(data=True))
 
     def tick(self):
+        # [ADDED] Nonblocking independent hardware register evidence.
+        self.torque_evidence.tick()
         now = time.monotonic()
+        if not self.motor_topic_ok and not self.torque_evidence.verified():
+            self.motor_ok = False
         try:
             if self.intent_enabled and self.fault is None:
                 if now-self.intent_rx > LEASE_SECONDS:
