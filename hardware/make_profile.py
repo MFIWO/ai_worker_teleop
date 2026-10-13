@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""[ADDED] Generate a model-checked, slower hardware COPY. No robot commands."""
+import argparse
+from copy import deepcopy
+import json
+import os
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+import yaml
+
+from hardware.xr_contract import (
+    ARM_NAMES, SIDES, MAX_JOINT_SPEED, GOAL_SPEED, ANGULAR_SPEED,
+    arm_signature, private_topic, sha256, verify_description, configured_arm_ids,
+)
+
+
+def resolve_meshes(text):
+    """[ADDED] Resolve resources on the ROBOT, not an absolute path from the PC."""
+    from ament_index_python.packages import get_package_share_directory
+    tree = ET.fromstring(text)
+    # Cyclo builds the COLLISION model only. Installed legacy SG2 visual URIs
+    # can reference an older mesh layout; they are not collision resources and
+    # must neither be guessed nor substituted for real SH5 collision geometry.
+    for mesh in tree.findall('.//collision/geometry/mesh'):
+        uri = mesh.get('filename', '')
+        if uri.startswith('package://'):
+            package, relative = uri[len('package://'):].split('/', 1)
+            path = Path(get_package_share_directory(package)) / relative
+        elif uri.startswith('file://'):
+            path = Path(uri[len('file://'):])
+        else:
+            path = Path(uri)
+        if not path.is_absolute() or not path.is_file():
+            raise ValueError(f'missing/unresolved robot mesh resource: {uri}')
+        mesh.set('filename', str(path.resolve()))
+    return ET.tostring(tree, encoding='unicode')
+
+
+def make_files(model, controller_text, description_text, config):
+    source = ET.fromstring(controller_text)
+    physical = ET.fromstring(description_text)
+    signature = arm_signature(source)
+    verify_description(description_text, model, signature)
+    tree = deepcopy(source)
+    limits = {}
+    for names in ARM_NAMES.values():
+        for name in names:
+            bound = tree.find(f"joint[@name='{name}']/limit")
+            lower, upper = float(bound.get('lower')), float(bound.get('upper'))
+            real_bound = physical.find(f"joint[@name='{name}']/limit")
+            if (real_bound is None or lower < float(real_bound.get('lower'))-1e-9
+                    or upper > float(real_bound.get('upper'))+1e-9
+                    or MAX_JOINT_SPEED > float(real_bound.get('velocity'))):
+                raise ValueError(f'{name}: controller bounds are not contained in the physical description')
+            if not lower < upper:
+                raise ValueError(f'invalid bounds for {name}')
+            if name.endswith('joint4') and upper > -.7 + 1e-12:
+                raise ValueError('Refuse expanded simulation joint4 model; use installed commissioning model')
+            if float(bound.get('velocity')) < MAX_JOINT_SPEED:
+                raise ValueError('native velocity is below selected commissioning speed; review manually')
+            limits[name] = [lower, upper]
+            bound.set('velocity', str(MAX_JOINT_SPEED))  # [CHANGED] velocity only; no position expansion.
+    output = deepcopy(config)
+    p = output['vr_controller']['ros__parameters']
+    if p.get('lift_vel_bound', 0.0) != 0.0:
+        raise ValueError('hardware arms-only commissioning requires the installed lift velocity bound0')
+    # [CHANGED] Same wrist-centric retarget; untouched collision/CBF/startup parameters.
+    p['weight_elbow_position'] = 0.0
+    for s in SIDES:
+        p[f'{s}_traj_topic'] = private_topic(model, s)
+        p[f'{s}_raw_traj_topic'] = f'/xr_hardware/{model}/unused/{s}_gripper'
+    p['lift_topic'] = f'/xr_hardware/{model}/unused/lift'
+    p['joint_states_topic'] = f'/xr_hardware/{model}/joint_states'
+    p['right_gripper_joint'] = '__xr_disabled_right_gripper__'
+    p['left_gripper_joint'] = '__xr_disabled_left_gripper__'
+    p['trajectory_time'] = 0.0
+    if p.get('weight_position') != 10.0 or p.get('weight_orientation') != 1.0:
+        raise ValueError('Unexpected Cyclo wrist weights; review the installed configuration')
+    return ET.tostring(tree, encoding='unicode'), output, limits, signature
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--model', required=True, choices=('sg2', 'sh5'))
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--controller-urdf', type=Path)
+    parser.add_argument('--srdf', type=Path)
+    parser.add_argument('--description', type=Path)
+    parser.add_argument('--config', type=Path)
+    parser.add_argument('--snapshot', type=Path, required=True,
+                        help='Passive measured joint snapshot. Required to freeze SH5 non-arm joints.')
+    a = parser.parse_args()
+    if any(p is None for p in (a.controller_urdf, a.srdf, a.description, a.config)):
+        from ament_index_python.packages import get_package_share_directory as share
+        models = Path(share('cyclo_motion_controller_models')) / 'models/ai_worker'
+        a.controller_urdf = a.controller_urdf or models / 'ffw_sg2_follower.urdf'
+        a.srdf = a.srdf or models / 'ffw_sg2_follower_default.srdf'
+        a.description = a.description or Path(share('ffw_description')) / f'urdf/ffw_{a.model}_rev1_follower/ffw_{a.model}_follower.urdf'
+        a.config = a.config or Path(share('cyclo_motion_controller_ros')) / 'config/ai_worker_config.yaml'
+    description_text = a.description.read_text()
+    motor_ids = configured_arm_ids(description_text, a.model)
+    snapshot = json.loads(a.snapshot.read_text())
+    urdf, cfg, limits, signature = make_files(a.model, a.controller_urdf.read_text(),
+                                             description_text, yaml.safe_load(a.config.read_text()))
+    frozen, model_report, srdf = {}, {}, a.srdf.read_text()
+    if a.model == 'sh5':
+        from hardware.sh5_model import build_sh5_model
+        urdf, srdf, frozen, model_report = build_sh5_model(
+            description_text, a.controller_urdf.read_text(), srdf, snapshot)
+        limits = model_report['arm_limits']
+    for name, (lower, upper) in limits.items():
+        if name not in snapshot or not lower <= float(snapshot[name]) <= upper:
+            raise ValueError(f'{name}: measured pose outside conservative controller limits. '
+                             'Use the already-verified hardware ready-pose procedure; no automatic motion is performed.')
+    urdf = resolve_meshes(urdf)
+    if model_report:
+        model_report['mesh_resources_verified'] = True
+    if a.model == 'sh5':
+        # [ADDED] Exact SH5 meshes took ~2.7s per distance evaluation on the
+        # checked PC. Enclosing boxes preserve coverage without a realtime hang.
+        from hardware.collision_primitives import enclose_collision_meshes
+        urdf, approximation = enclose_collision_meshes(urdf)
+        model_report['collision_approximation'] = approximation
+    paths = {'urdf': a.output / f'{a.model}_hardware_arms.urdf',
+             'config': a.output / 'controller.yaml', 'srdf': a.output / 'controller.srdf'}
+    contents = {'urdf': urdf, 'config': yaml.safe_dump(cfg, sort_keys=False), 'srdf': srdf}
+    # [DEBUG] Preflight every destination BEFORE any writes. Idempotent, never overwrite drift.
+    for k, p in paths.items():
+        if p.exists() and p.read_text() != contents[k]:
+            raise ValueError(f'Unrelated/different generated file already exists: {p}')
+    a.output.mkdir(parents=True, exist_ok=True)
+    for k, p in paths.items():
+        p.write_text(contents[k])
+    from hardware.check_collision import check_initial_pose
+    collision_report = check_initial_pose(paths['urdf'], paths['srdf'], snapshot,
+        cfg['vr_controller']['ros__parameters']['collision_safe_distance'])
+    manifest = {'schema': 1, 'mode': 'hardware_commissioning', 'model': a.model,
+                'validation_fixture': os.environ.get('AI_WORKER_XR_EXECUTION') == 'validation',
+                'limits': limits, 'arm_signature': signature,
+                'max_joint_speed': MAX_JOINT_SPEED, 'goal_speed': GOAL_SPEED,
+                'angular_speed': ANGULAR_SPEED, 'workspace_fraction': .94,
+                'source_urdf': str(a.controller_urdf.resolve()),
+                'source_urdf_sha256': sha256(a.controller_urdf),
+                'description_sha256': sha256(a.description), 'arm_dxl_ids': motor_ids,
+                'model_report': model_report,
+                'initial_collision_report': collision_report,
+                'tool_collision_coverage': ('SH5 collision meshes enclosed by conservative boxes; non-arm joints frozen at measured snapshot'
+                                            if a.model == 'sh5' else 'installed SG2 Cyclo collision geometry'),
+                'physical_motion_verified': False}
+    generated = ET.fromstring(urdf)
+    manifest['controller_joint_names'] = [j.get('name') for j in generated.findall('joint')
+                                           if j.get('type') not in ('fixed',)]
+    manifest['frozen_joints'] = frozen
+    for k, p in paths.items():
+        manifest[k] = str(p.resolve())
+        manifest[k+'_sha256'] = sha256(p)
+    (a.output/'profile.json').write_text(json.dumps(manifest, indent=2))
+    print('[PROFILE]', a.output/'profile.json')
+    print('[PRESERVED] conservative position bounds, collision geometry, CBF and all original files')
+    print('[COMMISSIONING] arm velocity=.35rad/s; wrist goal=.06m/s; no fingers/base/lift')
+    if a.model == 'sh5':
+        print('[SH5] Collision meshes conservatively enclosed by boxes; visual meshes retained; non-arm joints frozen.')
+        print('[LIMITATION] Not a moving-finger controller or a physical collision certification.')
+
+
+if __name__ == '__main__':
+    main()

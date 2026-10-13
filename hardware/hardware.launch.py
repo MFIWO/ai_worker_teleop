@@ -1,0 +1,30 @@
+"""[ADDED] Existing Cyclo + checker + robot-side lease gate. No follower bringup."""
+import os
+from pathlib import Path
+import sys
+
+from ament_index_python.packages import get_package_prefix
+from launch import LaunchDescription
+from launch.actions import ExecuteProcess, RegisterEventHandler, EmitEvent
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
+from launch_ros.actions import Node
+
+from hardware.xr_contract import load_profile
+
+
+def generate_launch_description():
+    profile_file = os.environ['AI_WORKER_XR_PROFILE']
+    p = load_profile(profile_file)
+    root = Path(__file__).resolve().parents[1]
+    gate = ExecuteProcess(cmd=[sys.executable, '-m', 'hardware.command_gate', '--profile', profile_file], output='screen')
+    controller = Node(package='cyclo_motion_controller_ros', executable='vr_controller_node',
+                      name='vr_controller', parameters=[p['config'], {'urdf_path': p['urdf'], 'srdf_path': p['srdf']}],
+                      output='screen')
+    checker = Node(package='cyclo_motion_controller_ros', executable='reference_checker_node',
+                   name='reference_checker', parameters=[p['config']], output='screen')
+    actions = [gate, controller, checker]
+    for process in (gate, controller, checker):
+        actions.append(RegisterEventHandler(OnProcessExit(target_action=process,
+            on_exit=[EmitEvent(event=Shutdown(reason='hardware control component exited'))])))
+    return LaunchDescription(actions)

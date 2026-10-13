@@ -2,6 +2,20 @@
 
 See [QUEST_TELEOP.md](QUEST_TELEOP.md) for this branch and the matching robot setup.
 
+## Wrist-delta retargeting (SG2 / SH5)
+
+**[ADDED 2026-10-14]** [SG2 / SH5 hardware commissioning](hardware/README.md)
+provides the model-specific, arms-only robot setup, slow wrist-delta controller,
+fixed calibration, passthrough alignment guides, robot-side communications
+watchdog and passive logs. Hardware starts disarmed and retains conservative
+position limits; it does not use the expanded simulation elbow model.
+
+The existing simulation experiments are documented in
+[XR_OVERHEAD_PATH.md](XR_OVERHEAD_PATH.md),
+[XR_CALIBRATION_OVERLAY.md](XR_CALIBRATION_OVERLAY.md) and
+[XR_EXTENSION.md](XR_EXTENSION.md). Old `model:=sg2` / `model:=sh5` launchers
+remain unchanged. Do not run two publishers or confuse simulation with hardware.
+
 # robotis_applications
 
 ROS Packages for Robotis Applications
