@@ -64,60 +64,18 @@ if (( PREPARE_READY )); then
   }
   echo '[READY POSE] SG2 both seven-joint arms to [0,0,0,-1.57,0,0,0] in >=5s.'
   echo '[READY POSE] Stop old Cyclo/VR command publishers; keep physical follower running.'
-  echo '[READY POSE] Checking arm DXL torque/health; does NOT enable torque.'
-  python3 - <<'PY'
-import time
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
-from dynamixel_interfaces.msg import DynamixelState
-from hardware.xr_contract import motor_health, ARM_DXL_IDS
-
-rclpy.init(args=[])
-node = Node('sg2_ready_pose_motor_precheck')
-state = {'last_rx': 0., 'healthy_since': None,
-         'reason': 'no /ffw_follower/dxl_state received'}
-expected = {identity for ids in ARM_DXL_IDS.values() for identity in ids}
-
-def callback(msg):
-    now = time.monotonic()
-    stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-    age = node.get_clock().now().nanoseconds * 1e-9 - stamp
-    indexed = dict(zip(msg.id, msg.torque_state))
-    off = sorted(i for i in expected if not indexed.get(i, False))
-    healthy = (-0.1 <= age <= 0.5 and motor_health(
-        msg.id, msg.torque_state, msg.dxl_hw_state, msg.comm_state))
-    state['last_rx'] = now
-    if healthy:
-        if state['healthy_since'] is None:
-            state['healthy_since'] = now
-        state['reason'] = ''
-    else:
-        state['healthy_since'] = None
-        state['reason'] = (f'DXL health not ready: comm_state={msg.comm_state}, '
-                           f'arm torque-off IDs={off}, message_age={age:.3f}s')
-
-subscription = node.create_subscription(
-    DynamixelState, '/ffw_follower/dxl_state', callback, qos_profile_sensor_data)
-try:
-    end = time.monotonic() + 5.0
-    passed = False
-    while time.monotonic() < end:
-        rclpy.spin_once(node, timeout_sec=0.1)
-        now = time.monotonic()
-        if (state['healthy_since'] is not None and
-                now - state['healthy_since'] >= 0.3 and
-                now - state['last_rx'] <= 0.5):
-            passed = True
-            break
-    if not passed:
-        raise SystemExit('[NOT READY] ' + state['reason'] +
-            '; use the verified ROBOTIS procedure to enable torque first. No motion sent.')
-    print('[PASS] Fresh healthy arm DXL feedback and torque-on; running ready-pose mover.')
-finally:
-    node.destroy_node()
-    rclpy.shutdown()
-PY
+  # [CHANGED] One read-only precheck; the upstream torque_state topic may be
+  # unreliable. Require fresh DXL bus, synchronized clocks, and either
+  # reliable ON telemetry or positive reads of all 14 Torque Enable registers.
+  # Do NOT send arm commands when hardware proof is unavailable.
+  [[ -f "$HERE/hardware/ready_pose_precheck.py" ]] || {
+    echo '[ERROR] Missing hardware/ready_pose_precheck.py; sync the new MFIWO PC helper'
+    exit 1
+  }
+  python3 -m hardware.ready_pose_precheck --timeout 30 || {
+    echo '[ERROR] SG2 ready-pose check failed; Vuer will NOT start'
+    exit 1
+  }
   # Existing mover also checks fresh measured joints, both action servers,
   # other publishers, stationary arms, completion, and measured settling.
   python3 "$HERE/robotis_vuer/robotis_vuer/prepare_sg2_ready_pose.py" --duration 5.0 || {
