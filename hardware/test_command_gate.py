@@ -50,6 +50,8 @@ class GateTests(unittest.TestCase):
         self.gate.measured=q
         self.gate.measured_rx=self.gate.motor_rx=time.monotonic()
         self.gate.description_ok=self.gate.motor_ok=True
+        # [CHANGED] Simulated healthy DXL telemetry for strict gate readiness.
+        self.gate.motor_topic_ok=True
         self.sequence=0
 
     def tearDown(self):
@@ -106,6 +108,28 @@ class GateTests(unittest.TestCase):
         first=self.gate.motor_rx
         with patch('hardware.command_gate.time.monotonic',return_value=first+1):self.gate.motor_state(msg)
         self.assertEqual(first,self.gate.motor_rx)
+
+    def test_unverified_false_torque_telemetry_never_enables_output(self):
+        # [ADDED] Neither an empty service nor a false reported motor state
+        # authorizes the gate to write any command.
+        self.gate.motor_topic_ok=False
+        self.gate.torque_evidence.verified=lambda:False
+        self.intent(False);self.intent(True)
+        self.gate.tick()
+        self.assertIsNotNone(self.gate.fault)
+        self.assertFalse(self.gate.output_active)
+        self.assertEqual(self.sent,[])
+
+    def test_independent_positive_register_proof_keeps_gate_checks(self):
+        # [ADDED] Positive register reads substitute only for bad telemetry,
+        # not a stale DXL heartbeat or a controller graph violation.
+        self.gate.motor_topic_ok=False
+        self.gate.torque_evidence.verified=lambda:True
+        self.start()
+        self.assertTrue(self.gate.output_active)
+        self.gate.motor_rx=time.monotonic()-1
+        self.gate.tick()
+        self.assertIn('motor read',self.gate.fault)
 
     def test_manual_stop_retains_latched_fault(self):
         self.start();self.gate.latch('injected test fault');self.intent(False);self.intent(True)
