@@ -30,6 +30,9 @@ class ReadyPosePrecheck(Node):
         self.motor_stamp = self.joint_stamp = -math.inf
         self.ready_since = None
         self.reason = 'waiting for SG2 follower feedback'
+        self.large_skew_count = 0
+        self.large_skew_age = 0.0
+        self.large_skew_last_stamp = -math.inf
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.subs = [
             self.create_subscription(JointState, '/joint_states', self.joints, qos),
@@ -60,7 +63,14 @@ class ReadyPosePrecheck(Node):
         if not (-.1 <= age <= .5 and stamp > self.motor_stamp):
             self.motor_good = False
             self.reason = f'DXL message clock mismatch/replay; PC minus robot age={age:.3f}s; sync both host clocks'
+            # [ADDED] Fail promptly on repeated live messages with >2s clock
+            # difference instead of asking operators to wait a full timeout.
+            if math.isfinite(age) and abs(age) > 2.0 and stamp > self.large_skew_last_stamp:
+                self.large_skew_count += 1
+                self.large_skew_age = age
+                self.large_skew_last_stamp = stamp
             return
+        self.large_skew_count = 0
         self.motor_stamp, self.motor_rx = stamp, time.monotonic()
         expected = set(ARM_DXL_IDS['left'] + ARM_DXL_IDS['right'])
         id_ok = (len(msg.id) == len(set(msg.id))
@@ -107,6 +117,10 @@ def main():
         while time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=.05)
             node.proof.tick()
+            if node.large_skew_count >= 5:
+                raise SystemExit(
+                    f'[CLOCK MISMATCH] PC minus robot time {node.large_skew_age:.3f}s. '
+                    'Synchronize host clocks before motion; no command sent.')
             if node.ready():
                 if not node.reported_torque_good:
                     print('[WARN] Upstream torque_state reports False; all 14 Torque Enable registers READ as 1')
