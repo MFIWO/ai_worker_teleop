@@ -46,7 +46,8 @@ if (( ALLOW_TORQUE_OFF )); then
   # [ADDED] Read-only standby mode; the command gate's live torque guard is untouched.
   SNAPSHOT_ARGS+=(--allow-torque-off)
 fi
-python3 -m hardware.capture_snapshot --model "$MODEL" --output "$PROFILE/snapshot" "${SNAPSHOT_ARGS[@]}"
+# [CHANGED] Allow up to 30s for Zenoh discovery + measured-state stabilization.
+python3 -m hardware.capture_snapshot --model "$MODEL" --output "$PROFILE/snapshot" --timeout 30 "${SNAPSHOT_ARGS[@]}"
 python3 -m hardware.make_profile --model "$MODEL" --output "$PROFILE" \
   --description "$PROFILE/snapshot/robot_description.urdf" --snapshot "$PROFILE/snapshot/joints.json"
 export AI_WORKER_XR_PROFILE="$PROFILE/profile.json"
