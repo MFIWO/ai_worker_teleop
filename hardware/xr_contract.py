@@ -39,6 +39,20 @@ def configured_arm_ids(description_text, model):
     return {side: list(ids) for side, ids in ARM_DXL_IDS.items()}
 
 
+def motor_read_health(ids, errors, comm_state, expected=ARM_DXL_IDS):
+    """[ADDED] Check fresh motor bus IDs, error codes and communication without torque claims.
+
+    A positive Torque Enable register read (TorqueEvidence) is additionally
+    required before this can authorize a physical motion.
+    """
+    ids, errors = list(ids), list(errors)
+    if (comm_state != 0 or len(ids) != len(set(ids)) or len(ids) != len(errors)):
+        return False
+    reported = dict(zip(ids, errors))
+    return all(identity in reported and reported[identity] == 0
+               for group in expected.values() for identity in group)
+
+
 def motor_health(ids, torque, errors, comm_state, expected=ARM_DXL_IDS):
     ids, torque, errors = list(ids), list(torque), list(errors)
     if (comm_state != 0 or len(ids) != len(set(ids)) or len(ids) != len(torque)
