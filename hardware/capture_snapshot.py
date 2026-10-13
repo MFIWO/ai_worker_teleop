@@ -13,8 +13,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from dynamixel_interfaces.msg import DynamixelState
-from hardware.xr_contract import configured_arm_ids, motor_health, motor_read_health, ARM_DXL_IDS
-from hardware.torque_evidence import TorqueEvidence
+from hardware.xr_contract import configured_arm_ids, motor_health, ARM_DXL_IDS
 
 
 class Snapshot(Node):
@@ -26,8 +25,6 @@ class Snapshot(Node):
         self.allow_torque_off = bool(allow_torque_off)
         self.motor_snapshot_ok = False
         self.motor_torque_off = False
-        # [ADDED] Read-only hardware torque register fallback for upstream false reports.
-        self.torque_evidence = TorqueEvidence(self)
         self.js_rx = self.motor_rx = -math.inf
         self.last_source = -math.inf
         self.still_since = None
@@ -87,19 +84,16 @@ class Snapshot(Node):
                         and len(msg.id) == len(msg.dxl_hw_state)
                         and expected_ids.issubset(indexed)
                         and (self.motor_ids is None or ids == self.motor_ids))
-        physical_ok = (arrays_valid and motor_read_health(
-            msg.id, msg.dxl_hw_state, msg.comm_state))
+        physical_ok = (arrays_valid and msg.comm_state == 0
+                       and all(msg.dxl_hw_state[indexed[i]] == 0
+                               for i in expected_ids))
         all_off = bool(physical_ok and
                        all(not bool(msg.torque_state[indexed[i]])
                            for i in expected_ids))
-        reported_ok = bool(physical_ok and motor_health(
+        self.motor_ok = bool(physical_ok and motor_health(
             msg.id, msg.torque_state, msg.dxl_hw_state, msg.comm_state))
-        # [ADDED] A real Torque Enable read is required to override an unreliable
-        # False report; a SetBool service acknowledgement is NOT sufficient.
-        direct_ok = bool(physical_ok and self.torque_evidence.verified())
-        self.motor_ok = reported_ok or direct_ok
-        if direct_ok and not reported_ok:
-            self.torque_evidence.warning_once()
+        # [ADDED] Permit only two consistent states: all 14 arm torques on,
+        # or (passive check-only) all 14 off. Partial torque ON fails closed.
         self.motor_torque_off = all_off
         self.motor_snapshot_ok = self.motor_ok or (self.allow_torque_off and all_off)
         if self.motor_snapshot_ok:
@@ -133,17 +127,13 @@ def main():
         start = time.monotonic()
         while time.monotonic()-start < a.timeout:
             rclpy.spin_once(node, timeout_sec=.05)
-            node.torque_evidence.tick()
             if node.ready():
                 a.output.mkdir(parents=True, exist_ok=False)
                 (a.output/'robot_description.urdf').write_text(node.xml)
                 (a.output/'joints.json').write_text(json.dumps(node.state, indent=2))
-                if node.motor_torque_off and node.motor_ok:
-                    print('[WARN] torque_state=False, independently verified ALL 14 arm Torque Enable registers ON')
-                    print('[PASS] passive hardware preflight; motor register evidence, stable joints, healthy DXL reads')
-                elif node.motor_torque_off:
-                    print('[PASS] READ-ONLY STANDBY SNAPSHOT: all arm torques reported OFF, healthy DXL reads')
-                    print('[NOT MOTION READY] Controller launch and ready-pose movement still require verified torque ON')
+                if node.motor_torque_off:
+                    print('[PASS] READ-ONLY STANDBY SNAPSHOT: all arm torques OFF, healthy DXL reads')
+                    print('[NOT MOTION READY] Controller launch and ready-pose movement still require torque ON')
                 else:
                     print('[PASS] passive hardware preflight; stable joints, healthy DXL read, matching model')
                 print('[SAVED]', a.output)
