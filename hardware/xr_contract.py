@@ -39,6 +39,21 @@ def configured_arm_ids(description_text, model):
     return {side: list(ids) for side, ids in ARM_DXL_IDS.items()}
 
 
+def motor_read_health(ids, errors, comm_state, expected=ARM_DXL_IDS):
+    """[ADDED] Real DXL transport/ID/hardware-error health, independent of torque report.
+
+    Torque control is validated separately by TorqueEvidence's live register reads
+    when the upstream torque_state array is unreliable. No command authorization
+    may be based on this transport-only check by itself.
+    """
+    ids, errors = list(ids), list(errors)
+    if (comm_state != 0 or len(ids) != len(set(ids)) or len(ids) != len(errors)):
+        return False
+    indexed = dict(zip(ids, errors))
+    return all(identity in indexed and indexed[identity] == 0
+               for values in expected.values() for identity in values)
+
+
 def motor_health(ids, torque, errors, comm_state, expected=ARM_DXL_IDS):
     ids, torque, errors = list(ids), list(torque), list(errors)
     if (comm_state != 0 or len(ids) != len(set(ids)) or len(ids) != len(torque)
