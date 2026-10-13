@@ -50,9 +50,15 @@ output rate and a fresh PC intent lease. It forwards **seven arm joints only**;
 Real Dynamixel-read health is required from `/ffw_follower/dxl_state` with
 `dynamixel_interfaces/msg/DynamixelState`. Arm motor IDs are right1..7 and
 left31..37, verified against GPIO definitions in the expanded description.
-Communication failures, missing/replayed health timestamps, arm torque off,
-hardware errors or a PC lease older than0.5s latch the gate. Fresh joint-state
-timestamps alone are not enough: the hardware driver can temporarily publish
+Communication failures, missing/replayed health timestamps, missing torque
+evidence, hardware errors or a PC lease older than0.5s latch the gate. The
+upstream driver's published `torque_state` may remain False while torque is
+actually ON; this release therefore **does not treat False as a warning alone**.
+It requires fresh, independent, positive `Torque Enable` register reads for
+all 14 physical arm motors via `/ffw_follower/get_dxl_data` before accepting
+that mismatch. A failed, missing or stale register read continues to block
+motion. No component in this release turns torque on automatically. Fresh
+joint-state timestamps alone are insufficient; the hardware driver may publish
 cached joint values during a motor-read failure.
 
 Cyclo receives a canonical-order joint-state stream from the gate because its
@@ -122,65 +128,81 @@ The robot image needs the same installed Cyclo/ffw_description packages,
 The checked image is `robotis/ai-worker:2.2.7`. An unknown model/library is an
 error to review, not permission to bypass validation.
 
-## Robot terminal — choose SG2 or SH5
+## SG2 three-terminal hardware startup (follower → PC ready → Cyclo)
 
-Keep the **already-working physical follower** running using its established
-procedure. Stop the previous Cyclo VR controller and Vuer before switching.
-This wrapper intentionally does not start `ffw_*_follower_ai.launch.py`: that
-launch can initialize arms, wheels and SH5 finger effort even with no VR hand node.
+**One-time setup:** PC and robot clocks must be synchronized (within the
+existing 0.5s message-age limit). The user's previous robot clock was over
+40 hours behind the PC; do not disable the timestamp checks. Confirm that the
+robot's original physical emergency stop works and the workspace is clear.
 
-Inside the robot's AI Worker Docker:
+The SG2 native home `arm_[lr]_joint4=0` is outside Cyclo's native
+joint4 upper bound `-0.7rad`. This is WHY starting `run_controller.sh sg2`
+before the existing measured `-1.57rad` ready pose failed. The intended
+order is the same as the previously working `controller_pc.sh` path.
+
+**Robot terminal 1: existing physical follower** (exactly once, in ai_worker Docker):
 
 ```bash
-export ROS_DOMAIN_ID=30
+export ROS_DOMAIN_ID=30 RMW_IMPLEMENTATION=rmw_zenoh_cpp
+ros2 launch ffw_bringup ffw_sg2_follower_ai.launch.py
+```
+
+**PC terminal 2: after follower is stable, ready pose then Vuer** (in
+robotis-applications Docker; replace the IP with the actual robot router):
+
+```bash
+export ROS_DOMAIN_ID=30 RMW_IMPLEMENTATION=rmw_zenoh_cpp
+unset ZENOH_CONFIG_OVERRIDE
+bash /root/ros2_ws/src/robotis_applications/run_xr_hardware_pc.sh \
+  sg2 --ready-pose --arm --robot-ip 192.168.5.102
+```
+
+PC first performs a **read-only** bus/torque/clock precheck. If the upstream
+`torque_state` reports False, it reads each physical arm's `Torque Enable`
+register; only **all fourteen registers=1** plus a healthy bus can continue.
+If some are truly OFF, no motion is sent: use the manufacturer's verified
+follower procedure and never bypass the check. The existing
+`prepare_sg2_ready_pose.py` then sends a measured-start, five-second-minimum
+quintic path to both 7-joint arm action controllers. It requires action
+success and measured convergence before starting Vuer. Old VR/Cyclo writers
+must not run during the move. Vuer starts inactive until manual X+A.
+
+**Robot terminal 3: start only after PC displays `READY`** (ai_worker Docker):
+
+```bash
+export ROS_DOMAIN_ID=30 RMW_IMPLEMENTATION=rmw_zenoh_cpp
 bash /workspace/ai_worker_xr/hardware/run_controller.sh sg2
 ```
 
-For SH5 use the same command with `sh5`. It first passively obtains the actual
-description, increasing fresh motor/joint data and a stable measured posture.
-It generates a new profile, verifies collision mesh resources and checks native
-clearance for collision pairs affected by arm movement before starting Cyclo.
-The gate and controller start **inactive** until a checked manual X+A.
+The robot passively snapshots the **new measured ready posture** and checks
+native joint bounds, self-collision clearance, live motor/clock feedback and
+model consistency. It launches Cyclo, checker and gate inactive. The gate
+retains the original speed bounds, robot/PC freshness and fault latches.
+Connect Quest to Vuer; release X/A before a fresh X+A after READY.
+Y+B stops tracking. No hand/gripper/base/lift target is forwarded.
 
-For a **passive-only** check, add `--check-only`. No Cyclo or gate is launched.
-If the measured initial pose is outside original limits or lacks native
-collision clearance, it refuses rather than moving automatically. Use the
-robot's known-good ready-pose workflow, keep clear, then retry. Do not change
-the clearance threshold to make an unverified pose pass.
+You may run `bash .../run_controller.sh sg2 --check-only` after the ready
+pose to test without launching Cyclo. `--allow-torque-off` is **passive
+check-only** and never permission to move the real robot.
 
-Generated robot-local files are stored under
-`/workspace/ai_worker_xr_profiles/{model}_<unique timestamp>/` and are not committed.
+**SH5:** the SG2 automatic ready mover does not apply. The existing SH5
+follower/model snapshot procedure still applies. Do not use `--ready-pose`
+with SH5.
 
-## PC / ROBOTIS Applications terminal
+## Robot terminal — existing SG2/SH5 model details
 
-The PC Docker must mount this branch at
-`/root/ros2_ws/src/robotis_applications` (as in the existing setup).
+The controller wrapper never starts the follower or issues a ready pose. It
+generates a unique robot-local profile after stable measured feedback, checks
+the native geometry and joint limits, and starts inactive. The existing
+Cyclo/CBF/reference-checker and hardware gate remain active guards.
+Generated profiles are saved under
+`/workspace/ai_worker_xr_profiles/{model}_<unique timestamp>/`.
+A failed native clearance or a joint outside conservative limits is a
+reason to stop, not to widen model limits.
 
-Observe-only startup, X+A cannot enable motion:
-
-```bash
-export ROS_DOMAIN_ID=30
-bash /root/ros2_ws/src/robotis_applications/run_xr_hardware_pc.sh sg2
-```
-
-After checking the correct robot, unobstructed workspace and emergency stop,
-restart the PC publisher in explicitly armed commissioning mode:
-
-```bash
-export ROS_DOMAIN_ID=30
-bash /root/ros2_ws/src/robotis_applications/run_xr_hardware_pc.sh sg2 --arm
-```
-
-For SH5 replace `sg2` with `sh5` on **both** robot and PC commands. Do not also
-run the old `model:=sh5` optical-hand publisher. The new mode uses Quest motion
-controllers for arm wrists only. The existing HTTPS/WSS8012 address and local
-certificate remain; certificates and private keys are not in Git.
-
-Refresh the Quest page. First X+A captures calibration; wait for
-`[XR RESUME READY]` / `ACTIVE`. If `WAIT_START` appears, match the white tracked
-points **and** axes to the coloured targets, release X/A then press again.
-Y+B stops. Repeated X+A does not re-zero an active session. Begin with slow,
-small arm motions; larger goal errors still stop commissioning.
+The SH5 reduced-control-model handling and frozen-joint restrictions described
+above continue to apply. This flow has synthetic integration evidence, not a
+completed real-motor deployment test.
 
 ## Passive log in another robot Docker terminal
 
