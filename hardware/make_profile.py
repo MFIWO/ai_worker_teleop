@@ -109,10 +109,19 @@ def main():
         urdf, srdf, frozen, model_report = build_sh5_model(
             description_text, a.controller_urdf.read_text(), srdf, snapshot)
         limits = model_report['arm_limits']
+    # [CHANGED] Diagnose wrong launch ORDER with the exact observed joint angle.
+    # Do NOT loosen native limits or synthesize a corrected measured posture.
     for name, (lower, upper) in limits.items():
-        if name not in snapshot or not lower <= float(snapshot[name]) <= upper:
-            raise ValueError(f'{name}: measured pose outside conservative controller limits. '
-                             'Use the already-verified hardware ready-pose procedure; no automatic motion is performed.')
+        if name not in snapshot:
+            raise ValueError(f'{name}: no measured feedback in physical joint snapshot')
+        measured = float(snapshot[name])
+        if not lower <= measured <= upper:
+            raise ValueError(
+                f'{name}: measured {measured:+.4f} rad outside native Cyclo '
+                f'[{lower:+.4f}, {upper:+.4f}] rad. '
+                'SG2 must run its verified PC ready-pose trajectory FIRST '
+                '(both arm joint4 near -1.57 rad), then run_controller.sh. '
+                'No automatic motion or limit expansion has occurred.')
     urdf = resolve_meshes(urdf)
     if model_report:
         model_report['mesh_resources_verified'] = True
