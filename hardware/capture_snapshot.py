@@ -13,13 +13,18 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from dynamixel_interfaces.msg import DynamixelState
-from hardware.xr_contract import configured_arm_ids, motor_health
+from hardware.xr_contract import configured_arm_ids, motor_health, ARM_DXL_IDS
 
 
 class Snapshot(Node):
-    def __init__(self, model):
+    def __init__(self, model, allow_torque_off=False):
         super().__init__('xr_hardware_passive_preflight', enable_rosout=False, start_parameter_services=False)
         self.model, self.xml, self.state = model, None, None
+        # [ADDED] Only passive --check-only may accept all arms torque OFF.
+        # Live command_gate and hardware activation keep strict motor_health.
+        self.allow_torque_off = bool(allow_torque_off)
+        self.motor_snapshot_ok = False
+        self.motor_torque_off = False
         self.js_rx = self.motor_rx = -math.inf
         self.last_source = -math.inf
         self.still_since = None
@@ -70,15 +75,38 @@ class Snapshot(Node):
         if stamp <= self.motor_stamp or not -.1 <= age <= .5:
             return
         ids = tuple(sorted(msg.id))
-        self.motor_ok = (motor_health(msg.id, msg.torque_state, msg.dxl_hw_state, msg.comm_state)
-                         and (self.motor_ids is None or ids == self.motor_ids))
-        if self.motor_ok:
+        # [ADDED] A valid motor READ in standby is different from a motor
+        # that is torque-enabled and able to follow a physical trajectory.
+        expected_ids = set().union(*(set(v) for v in ARM_DXL_IDS.values()))
+        indexed = {identity: i for i, identity in enumerate(msg.id)}
+        arrays_valid = (len(msg.id) == len(set(msg.id))
+                        and len(msg.id) == len(msg.torque_state)
+                        and len(msg.id) == len(msg.dxl_hw_state)
+                        and expected_ids.issubset(indexed)
+                        and (self.motor_ids is None or ids == self.motor_ids))
+        physical_ok = (arrays_valid and msg.comm_state == 0
+                       and all(msg.dxl_hw_state[indexed[i]] == 0
+                               for i in expected_ids))
+        all_off = bool(physical_ok and
+                       all(not bool(msg.torque_state[indexed[i]])
+                           for i in expected_ids))
+        self.motor_ok = bool(physical_ok and motor_health(
+            msg.id, msg.torque_state, msg.dxl_hw_state, msg.comm_state))
+        # [ADDED] Permit only two consistent states: all 14 arm torques on,
+        # or (passive check-only) all 14 off. Partial torque ON fails closed.
+        self.motor_torque_off = all_off
+        self.motor_snapshot_ok = self.motor_ok or (self.allow_torque_off and all_off)
+        if self.motor_snapshot_ok:
             self.motor_ids = ids
+        elif not physical_ok:
+            self.error = 'Dynamixel ID/read/communication/hardware error; refuse snapshot'
+        else:
+            self.error = 'arm torque OFF or mixed; only --check-only --allow-torque-off permits ALL OFF'
         self.motor_stamp, self.motor_rx = stamp, time.monotonic()
 
     def ready(self):
         now = time.monotonic()
-        return (self.xml is not None and self.state is not None and self.motor_ok
+        return (self.xml is not None and self.state is not None and self.motor_snapshot_ok
                 and now-self.js_rx <= .5 and now-self.motor_rx <= .5
                 and self.still_since is not None and now-self.still_since >= .5
                 and all(self.count_publishers(t) == 1 for t in
@@ -90,9 +118,11 @@ def main():
     p.add_argument('--model', choices=('sg2', 'sh5'), required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--timeout', type=float, default=12.)
+    p.add_argument('--allow-torque-off', action='store_true',
+                   help='Passive snapshot ONLY: allow all arm torques OFF with healthy DXL reads')
     a = p.parse_args()
     rclpy.init(args=[])
-    node = Snapshot(a.model)
+    node = Snapshot(a.model, allow_torque_off=a.allow_torque_off)
     try:
         start = time.monotonic()
         while time.monotonic()-start < a.timeout:
@@ -101,7 +131,11 @@ def main():
                 a.output.mkdir(parents=True, exist_ok=False)
                 (a.output/'robot_description.urdf').write_text(node.xml)
                 (a.output/'joints.json').write_text(json.dumps(node.state, indent=2))
-                print('[PASS] passive hardware preflight; stable joints, healthy DXL read, matching model')
+                if node.motor_torque_off:
+                    print('[PASS] READ-ONLY STANDBY SNAPSHOT: all arm torques OFF, healthy DXL reads')
+                    print('[NOT MOTION READY] Controller launch and ready-pose movement still require torque ON')
+                else:
+                    print('[PASS] passive hardware preflight; stable joints, healthy DXL read, matching model')
                 print('[SAVED]', a.output)
                 return
         raise SystemExit('[NOT READY] ' + node.error + '; no commands sent')
