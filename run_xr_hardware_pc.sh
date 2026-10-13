@@ -4,19 +4,32 @@
 set -eo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MODEL="${1:-}"; shift || true
-case "$MODEL" in sg2|sh5) ;; *) echo 'Usage: bash run_xr_hardware_pc.sh sg2|sh5 [--arm] [--ready-pose]'; exit 2;; esac
+case "$MODEL" in sg2|sh5) ;; *) echo 'Usage: bash run_xr_hardware_pc.sh sg2|sh5 [--arm] [--ready-pose] [--ready-only] [--robot-ip IPv4_OR_HOSTNAME]'; exit 2;; esac
 export AI_WORKER_XR_ALLOW_ARM=0
 PREPARE_READY=0
+READY_ONLY=0       # [ADDED] Move to measured ready pose, exit BEFORE starting Vuer.
+ROBOT_ROUTER=""     # [ADDED] Explicit robot Zenoh router; no manual shell override needed.
 while (( $# )); do
   case "$1" in
     --arm) export AI_WORKER_XR_ALLOW_ARM=1 ;;
     --ready-pose) PREPARE_READY=1 ;;
+    --ready-only) READY_ONLY=1; PREPARE_READY=1 ;;
+    --robot-ip)
+      if (( $# < 2 )) || [[ -z "$2" ]]; then
+        echo '[ERROR] --robot-ip needs the actual robot IP/hostname'; exit 2
+      fi
+      ROBOT_ROUTER="$2"
+      shift
+      ;;
     *) echo "[ERROR] Unknown argument: $1"; exit 2 ;;
   esac
   shift
 done
 if (( PREPARE_READY )) && [[ "$MODEL" != sg2 ]]; then
   echo '[ERROR] --ready-pose is SG2-only; no verified SH5 ready-pose mover'; exit 2
+fi
+if (( READY_ONLY )) && [[ "$AI_WORKER_XR_ALLOW_ARM" == 1 ]]; then
+  echo '[ERROR] --ready-only cannot be combined with --arm; the XR node will not start'; exit 2
 fi
 source /opt/ros/jazzy/setup.bash
 source /root/ros2_ws/install/setup.bash
@@ -27,6 +40,21 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
 export AI_WORKER_XR_EXECUTION=hardware AI_WORKER_XR_MODEL="$MODEL"
 unset ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE ROS_STATIC_PEERS
 export PYTHONPATH="$HERE:$HERE/robotis_vuer:${PYTHONPATH:-}"
+# [ADDED] Use the actual robot's router when --robot-ip is supplied.
+# Never silently override an operator-provided Zenoh config or accept shell metacharacters.
+if [[ -n "$ROBOT_ROUTER" ]]; then
+  if [[ ! "$ROBOT_ROUTER" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo '[ERROR] Invalid --robot-ip (IPv4 or DNS hostname only)'; exit 2
+  fi
+  if [[ -n "${ZENOH_CONFIG_OVERRIDE:-}" ]]; then
+    echo '[ERROR] Existing ZENOH_CONFIG_OVERRIDE set; unset it before using --robot-ip'; exit 2
+  fi
+  export ZENOH_CONFIG_OVERRIDE="mode=\"client\";connect/endpoints=[\"tcp/${ROBOT_ROUTER}:7447\"]"
+  export ZENOH_ROUTER_CHECK_ATTEMPTS="${ZENOH_ROUTER_CHECK_ATTEMPTS:-5}"
+  echo "[ZENOH] Connecting to explicitly selected robot router: $ROBOT_ROUTER:7447"
+elif [[ "$RMW_IMPLEMENTATION" == rmw_zenoh_cpp && -z "${ZENOH_CONFIG_OVERRIDE:-}" ]]; then
+  echo '[WARN] No robot router specified. Use --robot-ip <ROBOT_IP> or an existing ZENOH_CONFIG_OVERRIDE.'
+fi
 
 if (( PREPARE_READY )); then
   # [ADDED] The legacy mover sends BOTH arms to [0,0,0,-1.57,0,0,0], not elbow only.
@@ -95,6 +123,11 @@ PY
   python3 "$HERE/robotis_vuer/robotis_vuer/prepare_sg2_ready_pose.py" --duration 5.0 || {
     echo '[ERROR] Ready-pose move failed; hardware XR publisher NOT started'; exit 1;
   }
+  if (( READY_ONLY )); then
+    echo '[READY POSE] Measured SG2 ready pose reached. No VR publisher started.'
+    echo '[NEXT] Start robot run_controller.sh sg2, then launch this PC script with sg2 --arm (no --ready-pose).'
+    exit 0
+  fi
   echo '[READY POSE] Complete; starting XR publisher.'
 fi
 
