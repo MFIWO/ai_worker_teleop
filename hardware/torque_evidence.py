@@ -14,7 +14,9 @@ from hardware.xr_contract import ARM_DXL_IDS
 class TorqueEvidence:
     """Asynchronous rolling confirmation of all arm Torque Enable registers."""
 
-    def __init__(self, node, max_age=4.0):
+    def __init__(self, node, max_age=6.0):
+        # [CHANGED] Bound evidence freshness: all 14 positive register reads
+        # must fit in this rolling window. If the driver is too slow, fail closed.
         self.node = node
         self.ids = tuple(ARM_DXL_IDS["right"] + ARM_DXL_IDS["left"])
         self.client = node.create_client(GetDataFromDxl, "/ffw_follower/get_dxl_data")
@@ -27,6 +29,7 @@ class TorqueEvidence:
         self.last_request = 0.0
         self.reason = "waiting for real Dynamixel Torque Enable register reads"
         self._warned = False
+        self._last_failure = None
 
     def verified(self):
         now = time.monotonic()
@@ -53,6 +56,10 @@ class TorqueEvidence:
                 # Do not retain a stale proof after a nonresponsive service.
                 self.good_at.pop(self.pending_id, None)
                 self.reason = f"DXL {self.pending_id} torque register read timed out"
+                try:
+                    self.future.cancel()
+                except Exception:
+                    pass
                 self.future = None
                 self.pending_id = None
             else:
@@ -67,7 +74,7 @@ class TorqueEvidence:
         req = GetDataFromDxl.Request()
         req.id = identity
         req.item_name = "Torque Enable"
-        req.timeout_sec = 0.5
+        req.timeout_sec = 0.5  # Bounded hardware read; never write/enable torque.
         try:
             self.future = self.client.call_async(req)
         except Exception as exc:
