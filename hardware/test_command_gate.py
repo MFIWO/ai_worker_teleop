@@ -131,6 +131,23 @@ class GateTests(unittest.TestCase):
         self.gate.tick()
         self.assertIn('motor read',self.gate.fault)
 
+    def test_false_report_with_positive_motor_register_reads(self):
+        # [ADDED] Match the user's ROBOTIS state report: every boolean false.
+        msg=DynamixelState()
+        msg.header.stamp=self.gate.get_clock().now().to_msg()
+        msg.id=ARM_DXL_IDS['right']+ARM_DXL_IDS['left']
+        msg.comm_state=0
+        msg.dxl_hw_state=[0]*14
+        msg.torque_state=[False]*14
+        self.gate.torque_evidence.verified=lambda:True
+        self.gate.torque_evidence.warning_once=lambda:None
+        self.gate.motor_state(msg)
+        self.assertTrue(self.gate.motor_ok)
+        self.assertFalse(self.gate.motor_topic_ok)
+        self.gate.torque_evidence.verified=lambda:False
+        self.gate.tick()
+        self.assertFalse(self.gate.motor_ok)
+
     def test_manual_stop_retains_latched_fault(self):
         self.start();self.gate.latch('injected test fault');self.intent(False);self.intent(True)
         count=len(self.sent);self.gate.tick()
