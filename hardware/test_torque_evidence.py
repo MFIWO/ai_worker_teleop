@@ -18,7 +18,7 @@ class FakeClient:
         return True
 
     def call_async(self, request):
-        self.requests.append((request.id, request.item_name))
+        self.requests.append((request.id, request.item_name, request.timeout_sec))
         f = Future()
         if self.responsive:
             f.set_result(SimpleNamespace(result=True, item_data=self.states[request.id]))
@@ -57,20 +57,22 @@ class TorqueEvidenceTests(unittest.TestCase):
 
     def test_all_fourteen_positive_reads_required(self):
         self.assertFalse(self.evidence.verified())
-        self.step(30)
+        self.step(120)
         self.assertTrue(self.evidence.verified())
-        self.assertEqual(set(i for i, _ in self.node.client.requests),
+        self.assertEqual(set(i for i, _, _ in self.node.client.requests),
                          set(self.evidence.ids))
-        self.assertEqual({name for _, name in self.node.client.requests},
+        self.assertEqual({name for _, name, _ in self.node.client.requests},
                          {'Torque Enable'})
+        self.assertTrue(all(timeout <= .01 for _, _, timeout in self.node.client.requests))
+        self.assertGreaterEqual(len(self.node.client.requests), 2 * len(self.evidence.ids))
 
     def test_one_motor_off_refuses_proof(self):
         self.node.client.states[34] = 0
-        self.step(40)
+        self.step(120)
         self.assertFalse(self.evidence.verified())
 
     def test_stale_proof_expires_without_new_service_data(self):
-        self.step(30)
+        self.step(120)
         self.assertTrue(self.evidence.verified())
         self.node.client.responsive = False
         self.clock += 7.
