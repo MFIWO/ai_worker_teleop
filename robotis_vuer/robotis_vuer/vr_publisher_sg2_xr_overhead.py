@@ -23,6 +23,8 @@ from robotis_vuer.xr_path_workspace import AnchorRayHint
 
 
 class XROverheadPublisher(XRGuidedPublisher):
+    TRACKING_POSITION_LIMIT_M = .25
+    TRACKING_ROTATION_LIMIT_RAD = np.pi / 2
     def __init__(self, start_server=True):
         self._path_ready = False
         self._path_rx = -1e9
@@ -71,7 +73,8 @@ class XROverheadPublisher(XRGuidedPublisher):
                 raise ValueError('shoulder/base moved during startup')
             dp = np.linalg.norm(self._goals[side][:3, 3] - actual[side][:3, 3])
             dr = Rotation.from_matrix(self._goals[side][:3, :3] @ actual[side][:3, :3].T).magnitude()
-            if dp > .02 or dr > np.deg2rad(10):
+            if (dp > self._session.position_tolerance_m or
+                    dr > np.deg2rad(self._session.rotation_tolerance_deg)):
                 raise ValueError(f'{side} measured pose moved during startup: '
                                  f'{dp*1000:.1f}mm/{np.rad2deg(dr):.1f}deg')
         return inputs, actual
@@ -103,9 +106,9 @@ class XROverheadPublisher(XRGuidedPublisher):
                     hint = hints[side]
                     if np.linalg.norm(links[side]['shoulder'][:3, 3] - hint.shoulder) > .005:
                         raise ValueError('shoulder/base moved during session; inspect simulator and recalibrate')
-                    if np.linalg.norm(goals[side][:3, 3] - actual[side][:3, 3]) > .25:
+                    if np.linalg.norm(goals[side][:3, 3] - actual[side][:3, 3]) > self.TRACKING_POSITION_LIMIT_M:
                         raise ValueError(f'{side} wrist tracking error exceeds0.25m')
-                    if Rotation.from_matrix(goals[side][:3, :3] @ actual[side][:3, :3].T).magnitude() > np.pi/2:
+                    if Rotation.from_matrix(goals[side][:3, :3] @ actual[side][:3, :3].T).magnitude() > self.TRACKING_ROTATION_LIMIT_RAD:
                         raise ValueError(f'{side} wrist orientation tracking error exceeds90deg')
                     raw = self._mapper.target(side, inputs[side])
                     requested = raw.copy()

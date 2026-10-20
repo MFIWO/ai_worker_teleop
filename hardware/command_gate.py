@@ -12,6 +12,7 @@ import math
 import os
 import signal
 import time
+import uuid
 
 import rclpy
 from rclpy.node import Node
@@ -22,13 +23,20 @@ from rcl_interfaces.msg import ParameterDescriptor
 from sensor_msgs.msg import JointState
 from dynamixel_interfaces.msg import DynamixelState
 from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from geometry_msgs.msg import Twist
+from hardware.aux_controls import AUX_TOPICS, JOINT_GROUPS, GRIPPERS, validate_aux, slew_aux
 
 from hardware.xr_contract import (
     ARM_NAMES, SIDES, FOLLOWER_TOPICS, GATE_NAME, PC_NAME, LEASE_SECONDS,
-    check_positions, check_step, load_profile, private_topic, verify_description, motor_health, configured_arm_ids,
+    check_positions, check_step, limit_step, load_profile, private_topic, verify_description,
+    motor_health, motor_read_health, configured_arm_ids, motor_readiness,
 )
+from hardware.torque_evidence import TorqueEvidence
 
+FEEDBACK_FRESH_SECONDS = .5
+FEEDBACK_WAIT_SECONDS = 5.0
 
 def deployment_domain():
     mode = os.environ.get('AI_WORKER_XR_EXECUTION', '')
@@ -49,6 +57,8 @@ class HardwareCommandGate(Node):
         self.declare_parameter('profile_json', json.dumps(public_profile),
                                ParameterDescriptor(read_only=True))
         self.model = self.profile['model']
+        # [CHANGED] Old profiles remain strict; normal launcher selects explicitly.
+        self.readiness_policy = self.profile.get('readiness_policy', 'strict_torque')
         self.description_ok = False
         self.measured = {}
         self.measured_rx = -math.inf
@@ -57,21 +67,37 @@ class HardwareCommandGate(Node):
         self.motor_stamp = -math.inf
         self.motor_ids = None
         self.motor_ok = False
+        # [FIX] Buffered service evidence disabled; compatibility object cannot authorise motion.
+        self.torque_evidence = TorqueEvidence(self)
+        self.motor_topic_ok = False
+        self.motor_read_ok = False  # [CHANGED] Do not confuse read health with torque proof.
         self.intent_rx = -math.inf
         self.intent_enabled = False
+        self.pc_intent_enabled = False
         self.enabled_since = None
         self.commands = {}
         self.previous = {}
         self.last_output = None
         self.fault = None
+        self.fault_detail = None  # [CHANGED 2026-10-14] Preserve the first rejected frame before hold clears it.
         self.output_active = False
+        self.feedback_waiting = False
+        self.aux_command = {'joints': {}, 'base': [0., 0., 0.]}
+        self.aux_previous = {}
+        self.aux_active = False
         self.reason = 'waiting for measured robot_description/joints and manual X+A'
         self.sequence = -1
+        self.gate_instance = uuid.uuid4().hex
+        self.status_sequence = 0
+        self.last_cleared_fault = None
         self.pc_session = None
         self.last_status = -math.inf
         self.last_graph = -math.inf
         self.graph_ok = False
         self.pub = {s: self.create_publisher(JointTrajectory, FOLLOWER_TOPICS[s], 10) for s in SIDES}
+        self.aux_pub = ({group: self.create_publisher(JointTrajectory, topic, 10)
+                        for group, topic in AUX_TOPICS.items()} if self.profile['auxiliary_limits'] else {})
+        self.base_pub = self.create_publisher(Twist, '/cmd_vel', 10) if self.aux_pub else None
         self.stop_pub = self.create_publisher(Bool, '/reactivate', 10)
         self.fault_pub = self.create_publisher(Bool, '/xr_hardware/fault', 10)
         self.status_pub = self.create_publisher(String, '/xr_hardware/gate_status', 10)
@@ -89,7 +115,15 @@ class HardwareCommandGate(Node):
             self.subs.append(self.create_subscription(
                 JointTrajectory, private_topic(self.model, s), lambda msg, side=s: self.command(msg, side), qos))
         self.timer = self.create_timer(.02, self.tick)
-        self.get_logger().info(f'[HARDWARE GATE] {self.model}; inactive, seven arm joints only; no fingers/base/lift.')
+        self.reset_service = self.create_service(Trigger, '/xr_hardware/reset_fault', self.reset_fault)
+        self.get_logger().info(f'[HARDWARE GATE] {self.model}; inactive; auxiliary controls={bool(self.aux_pub)}.')
+        self.get_logger().info('[HARDWARE GATE LIMITS] ' + json.dumps({
+            'source': 'verified controller URDF', 'positions_rad': self.profile['limits'],
+            'velocity_rad_s': self.profile['joint_velocity_limits'],
+            'tracking_window_s': self.profile['tracking_window_seconds'],
+            'tracking_budget_rad': self.profile['tracking_error_limits'],
+            'tracking_policy': self.profile['tracking_policy'],
+        }))
 
     def description(self, msg):
         try:
@@ -106,12 +140,10 @@ class HardwareCommandGate(Node):
                 self.latch(str(error))
 
     def joints(self, msg):
-        now = self.get_clock().now().nanoseconds * 1e-9
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         required = set().union(*ARM_NAMES.values())
         if (len(msg.name) != len(msg.position) or len(set(msg.name)) != len(msg.name)
-                or not required.issubset(msg.name) or not all(math.isfinite(x) for x in msg.position)
-                or not -.1 <= now - stamp <= .5):
+                or not required.issubset(msg.name) or not all(math.isfinite(x) for x in msg.position)):
             self.measured_rx = -math.inf
             return
         if stamp <= self.measured_stamp:
@@ -133,29 +165,36 @@ class HardwareCommandGate(Node):
                 self.measured_pub.publish(clean)
 
     def motor_state(self, msg):
-        now_ros = self.get_clock().now().nanoseconds*1e-9
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec*1e-9
-        if stamp <= self.motor_stamp or not -.1 <= now_ros-stamp <= .5:
+        if stamp <= self.motor_stamp:
             return
         ids = tuple(sorted(msg.id))
-        ok = motor_health(msg.id, msg.torque_state, msg.dxl_hw_state, msg.comm_state,
-                          self.profile['arm_dxl_ids'])
+        # [CHANGED] Keep bus/ID/error checks in BOTH policies. Normal operation
+        # uses the existing driver's torque management, not a broken extra proof.
+        bus_ok = motor_read_health(
+            msg.id, msg.dxl_hw_state, msg.comm_state, self.profile['arm_dxl_ids'])
+        reported_ok = motor_health(
+            msg.id, msg.torque_state, msg.dxl_hw_state, msg.comm_state,
+            self.profile['arm_dxl_ids'])
         if self.motor_ids is not None and ids != self.motor_ids:
-            ok = False
+            bus_ok = False
+        ok = bool(bus_ok and motor_readiness(
+            msg.id, msg.torque_state, msg.dxl_hw_state, msg.comm_state,
+            self.readiness_policy, self.profile['arm_dxl_ids']))
+        self.motor_read_ok = bool(bus_ok and len(msg.torque_state) == len(msg.id))
+        self.motor_topic_ok = bool(reported_ok)
         if ok:
             self.motor_ids = ids
-        self.motor_stamp, self.motor_rx, self.motor_ok = stamp, time.monotonic(), bool(ok)
+        self.motor_stamp, self.motor_rx, self.motor_ok = stamp, time.monotonic(), ok
         if not ok and self.intent_enabled:
-            self.latch('Dynamixel communication/torque/hardware-health failure')
+            self.latch('Dynamixel feedback rejected by ' + self.readiness_policy +
+                       ': bus/ID/hardware error or required reported torque missing')
 
     def intent(self, msg):
         try:
             data = json.loads(msg.data)
-            stamp = float(data['ros_time_s'])
-            now_ros = self.get_clock().now().nanoseconds*1e-9
-            if (data['model'] != self.model or not isinstance(data['enabled'], bool)
-                    or not math.isfinite(stamp) or not -.1 <= now_ros-stamp <= .5):
-                raise ValueError('wrong model or invalid/stale PC lease')
+            if data['model'] != self.model or not isinstance(data['enabled'], bool):
+                raise ValueError('wrong model or invalid PC lease')
             sequence, session = int(data['sequence']), str(data['session_id'])
             if session == self.pc_session and sequence <= self.sequence:
                 return
@@ -163,8 +202,10 @@ class HardwareCommandGate(Node):
                 # A new sender/session must first be observed DISARMED.
                 raise ValueError('new PC session attempted to begin already enabled')
             self.pc_session, self.sequence = session, sequence
+            aux = validate_aux(data.get('aux', {}), self.profile['auxiliary_limits'])
             self.intent_rx = time.monotonic()
             enabled = data['enabled']
+            self.pc_intent_enabled = enabled
             if enabled and not self.intent_enabled:
                 self.enabled_since = time.monotonic()
                 self.commands.clear()
@@ -173,6 +214,7 @@ class HardwareCommandGate(Node):
             if not enabled and self.intent_enabled:
                 self.hold('manual disarm or publisher guard')
             self.intent_enabled = enabled
+            self.aux_command = aux if enabled else {'joints': {}, 'base': [0., 0., 0.]}
         except (KeyError, ValueError, TypeError) as error:
             if self.intent_enabled:
                 self.latch('invalid lease: ' + str(error))
@@ -181,6 +223,12 @@ class HardwareCommandGate(Node):
         if not msg.points:
             return
         try:
+            # [CHANGED 2026-10-14] This relay is for native t=0 streaming only.
+            # Never compress an intentional multi-point/future trajectory into
+            # an immediate endpoint while preserving the streaming contract.
+            if (len(msg.points) != 1 or msg.points[0].time_from_start.sec != 0
+                    or msg.points[0].time_from_start.nanosec != 0):
+                raise ValueError('expected one native immediate Cyclo setpoint (time_from_start=0)')
             target = check_positions(side, msg.joint_names, msg.points[-1].positions, self.profile['limits'])
             self.commands[side] = (target, time.monotonic())
         except (ValueError, TypeError) as error:
@@ -194,6 +242,11 @@ class HardwareCommandGate(Node):
     def graph(self):
         if any(name == 'arm_retargeting_teleop' for name, _ in self.get_node_names_and_namespaces()):
             raise ValueError('legacy arm retargeter must be stopped')
+        if self.aux_pub:
+            for topic in (*AUX_TOPICS.values(), '/cmd_vel'):
+                writers = self.get_publishers_info_by_topic(topic)
+                if len(writers) != 1 or writers[0].node_name != GATE_NAME:
+                    raise ValueError(f'{topic}: require one hardware gate writer')
         for side in SIDES:
             raw = self.get_publishers_info_by_topic(private_topic(self.model, side))
             actual = self.get_publishers_info_by_topic(FOLLOWER_TOPICS[side])
@@ -209,21 +262,50 @@ class HardwareCommandGate(Node):
                 raise ValueError(f'{topic}: require exactly one physical feedback authority')
 
     def emit(self, target):
-        stamp = self.get_clock().now().to_msg()
+        # [CHANGED 2026-10-14] Preserve native Cyclo streaming semantics:
+        # zero header = start on receipt, single point at t=0 = current setpoint.
+        # Replacing a 100ms interpolation every 20ms adds lag to an already
+        # integrated/velocity-checked stream. Do not retime it inside this relay.
         for side in SIDES:
             msg = JointTrajectory()
-            msg.header.stamp = stamp
             msg.joint_names = list(ARM_NAMES[side])
+            gripper = GRIPPERS[side]
+            grip_value = target.get(gripper, self.aux_previous.get(gripper))
+            if grip_value is not None:
+                msg.joint_names.append(gripper)
             point = JointTrajectoryPoint()
-            point.positions = [float(target[k]) for k in msg.joint_names]
-            point.time_from_start.nanosec = 100_000_000
+            point.positions = [float(target[k]) if k in target else float(grip_value) for k in msg.joint_names]
             msg.points = [point]
             self.pub[side].publish(msg)
 
+    def emit_aux(self, joints, base):
+        for group, publisher in self.aux_pub.items():
+            names = JOINT_GROUPS[group]
+            if not any(name in joints for name in names):
+                continue
+            if not all(name in joints or name in self.measured for name in names):
+                raise ValueError(f'{group}: measured auxiliary state missing')
+            msg = JointTrajectory(joint_names=list(names))
+            msg.points = [JointTrajectoryPoint(positions=[float(joints.get(k, self.measured.get(k))) for k in names])]
+            publisher.publish(msg)
+        if self.base_pub is not None:
+            msg = Twist()
+            msg.linear.x, msg.linear.y, msg.angular.z = base
+            self.base_pub.publish(msg)
+        self.aux_active = bool(joints or any(base))
+
     def hold(self, reason):
+        self.feedback_waiting = False
         # [SAFETY] One measured position-hold, only after this gate was driving.
         if self.output_active and time.monotonic()-self.measured_rx <= .5:
             self.emit(self.measured)
+        if self.aux_pub:
+            held = ({k: self.measured[k] for k in self.aux_previous if k in self.measured}
+                    if self.aux_active and time.monotonic()-self.measured_rx <= .5 else {})
+            self.emit_aux(held, [0., 0., 0.])
+        self.aux_command = {'joints': {}, 'base': [0., 0., 0.]}
+        self.aux_previous.clear()
+        self.aux_active = False
         self.output_active = False
         self.commands.clear()
         self.reason = reason
@@ -232,22 +314,75 @@ class HardwareCommandGate(Node):
     def latch(self, reason):
         if self.fault is None:
             self.fault = reason
+            now = time.monotonic()
+            def finite(value):
+                return float(value) if value is not None and math.isfinite(value) else None
+            self.fault_detail = {
+                'origin': 'xr_hardware_gate',
+                'reason': str(reason),
+                'ros_time_s': self.get_clock().now().nanoseconds * 1e-9,
+                'measured_age_s': finite(now-self.measured_rx),
+                'joints': {name: {
+                    'target_rad': finite(value),
+                    'measured_rad': finite(self.measured.get(name)),
+                    'previous_output_rad': finite(self.previous.get(name)),
+                    'urdf_velocity_rad_s': self.profile['joint_velocity_limits'][name],
+                    'tracking_budget_rad': self.profile['tracking_error_limits'][name],
+                    'command_age_s': finite(now-receipt),
+                } for values, receipt in self.commands.values() for name, value in values.items()},
+            }
             self.hold(reason)
-            self.get_logger().error('[HARDWARE GATE FAULT] ' + reason + '; inspect then restart gate and PC')
+            self.get_logger().error('[HARDWARE GATE FAULT] ' + reason + '; disarm, resolve cause, then X+A to reset/retry')
+            self.get_logger().error('[HARDWARE GATE FRAME] ' + json.dumps(self.fault_detail, allow_nan=False))
         self.intent_enabled = False
         self.fault_pub.publish(Bool(data=True))
 
+    def reset_fault(self, request, response):
+        """Explicit manual retry; clear the latch only while disarmed and healthy."""
+        try:
+            now = time.monotonic()
+            if self.intent_enabled or self.pc_intent_enabled:
+                raise ValueError('disarm PC intent before resetting fault')
+            if now-self.intent_rx > LEASE_SECONDS:
+                raise ValueError('fresh disarmed PC lease required')
+            if not self.description_ok or now-self.measured_rx > .5:
+                raise ValueError('fresh verified model/joint feedback required')
+            if not self.motor_ok or now-self.motor_rx > .5:
+                raise ValueError('healthy motor feedback required')
+            if self.readiness_policy == 'strict_torque' and not self.motor_topic_ok:
+                raise ValueError('required torque telemetry not healthy')
+            for name,(lower,upper) in self.profile['limits'].items():
+                if name not in self.measured or not lower-.005 <= self.measured[name] <= upper+.005:
+                    raise ValueError(f'{name}: measured joint remains outside URDF bounds')
+            self.graph()
+            self.last_cleared_fault = {'fault': self.fault, 'detail': self.fault_detail}
+            self.hold('manual fault reset; waiting for fresh measured start')
+            self.fault = self.fault_detail = None
+            self.commands.clear()
+            self.fault_pub.publish(Bool(data=False))
+            self.last_status = -math.inf
+            response.success = True
+            response.message = json.dumps({'gate_instance': self.gate_instance,
+                                           'status_sequence': self.status_sequence})
+        except (ValueError, KeyError) as error:
+            response.success = False
+            response.message = str(error)
+        return response
+
     def tick(self):
+        # [FIX] No get_dxl_data polling inside the physical controller loop.
         now = time.monotonic()
+        if self.readiness_policy == 'strict_torque' and not self.motor_topic_ok:
+            self.motor_ok = False
         try:
             if self.intent_enabled and self.fault is None:
-                if now-self.intent_rx > LEASE_SECONDS:
+                if now-self.intent_rx > FEEDBACK_WAIT_SECONDS:
                     raise ValueError('PC intent lease expired')
                 if not self.description_ok:
                     raise ValueError('physical robot description not verified')
-                if now-self.measured_rx > .5:
+                if now-self.measured_rx > FEEDBACK_WAIT_SECONDS:
                     raise ValueError('measured joint feedback stale')
-                if not self.motor_ok or now-self.motor_rx > .5:
+                if not self.motor_ok or now-self.motor_rx > FEEDBACK_WAIT_SECONDS:
                     raise ValueError('motor read health stale or unhealthy; JointState stamp alone is insufficient')
                 if now-self.last_graph > .25:
                     self.graph()
@@ -263,26 +398,74 @@ class HardwareCommandGate(Node):
                     if now-self.enabled_since > 10.:
                         raise ValueError('no complete Cyclo output during startup')
                 else:
-                    if any(now-t > .5 for _, t in self.commands.values()):
+                    if any(now-t > FEEDBACK_WAIT_SECONDS for _, t in self.commands.values()):
                         raise ValueError('Cyclo output stale')
-                    receipts = [t for _, t in self.commands.values()]
-                    if max(receipts)-min(receipts) > .10:
-                        raise ValueError('left/right Cyclo commands out of sync by >.10s')
+                    waiting = (now-self.measured_rx > FEEDBACK_FRESH_SECONDS
+                               or now-self.intent_rx > FEEDBACK_FRESH_SECONDS
+                               or now-self.motor_rx > FEEDBACK_FRESH_SECONDS
+                               or any(now-t > FEEDBACK_FRESH_SECONDS for _, t in self.commands.values())
+                               or max(t for _, t in self.commands.values())
+                                  - min(t for _, t in self.commands.values()) > .10)
+                    if waiting:
+                        self.feedback_waiting = True
+                        # Keep the existing setpoint; never advance a stale QP output.
+                        if self.output_active:
+                            self.emit(self.previous)
+                        if self.aux_pub:
+                            self.emit_aux(self.aux_previous, [0., 0., 0.])
+                        self.last_output = now
+                        self.reason = 'waiting for robot/Cyclo feedback (maximum age 5s); holding targets'
+                    else:
+                        self.feedback_waiting = False
+                    if waiting:
+                        self.publish_status(now)
+                        return
                     target = {k: v for values, _ in self.commands.values() for k, v in values.items()}
-                    check_step(target, self.measured, self.previous, max(.001, now-self.last_output))
-                    self.emit(target)
-                    self.previous, self.last_output = target, now
+                    elapsed = max(.001, now-self.last_output)
+                    if self.readiness_policy == 'driver_managed':
+                        # [CHANGED 2026-10-14] The physical-only relay runs at a
+                        # different cadence from Cyclo. Do not latch a fault when
+                        # a valid fresh target advances faster than this relay's
+                        # instantaneous tick spacing; slew-limit what reaches the
+                        # follower. Normal mode uses URDF bounds/slew instead
+                        # of latching extra following-error thresholds.
+                        output = limit_step(target, self.measured, self.previous, elapsed,
+                                            self.profile['joint_velocity_limits'], enforce_tracking=False)
+                    else:
+                        check_step(target, self.measured, self.previous, elapsed,
+                                   self.profile['joint_velocity_limits'])
+                        output = target
+                    if self.aux_pub:
+                        aux_output = slew_aux(self.aux_command['joints'], self.aux_previous,
+                                              self.measured, self.profile['auxiliary_limits'], elapsed)
+                        self.aux_previous = aux_output
+                    self.emit(output)
+                    if self.aux_pub:
+                        self.emit_aux(aux_output, self.aux_command['base'])
+                    self.previous, self.last_output = output, now
                     self.output_active = True
-                    self.reason = 'forwarding validated arms-only targets'
+                    self.reason = 'forwarding validated arm and auxiliary targets'
         except (ValueError, KeyError) as error:
             self.latch(str(error))
+        self.publish_status(now)
+
+    def publish_status(self, now):
         if now-self.last_status >= .1:
             self.last_status = now
+            self.status_sequence += 1
             self.status_pub.publish(String(data=json.dumps({
+                'gate_instance': self.gate_instance, 'status_sequence': self.status_sequence,
                 'model': self.model, 'fault': self.fault, 'reason': self.reason,
+                'fault_detail': self.fault_detail,
                 'description_ok': self.description_ok, 'enabled': self.intent_enabled,
                 'forwarding': self.output_active, 'measured_fresh': now-self.measured_rx <= .5,
+                'feedback_waiting': self.feedback_waiting,
                 'motor_healthy': self.motor_ok and now-self.motor_rx <= .5,
+                # [CHANGED] Status preserves uncertainty; never claims register ON.
+                'readiness_policy': self.readiness_policy,
+                'motor_read_healthy': self.motor_read_ok and now-self.motor_rx <= .5,
+                'reported_torque_all_on': self.motor_topic_ok,
+                'physical_torque_verified': False,
                 'ros_time_s': self.get_clock().now().nanoseconds*1e-9,
             })))
 

@@ -21,6 +21,7 @@ from robotis_vuer.xr_extension_math import extended_templates, EXPERIMENT_Q4_UPP
 
 
 class XRExtensionPublisher(XRResumePublisher):
+    REZERO_ON_READY = False
     def __init__(self, start_server=True):
         self._profile_verified = False
         self._profile_rx = -1e9
@@ -36,7 +37,11 @@ class XRExtensionPublisher(XRResumePublisher):
         self._profile_client = AsyncParameterClient(self, '/vr_controller')
         self._profile_timer = self.create_timer(1.0, self._query_profile)
         self._log_extension_mode()
-        self.get_logger().info('[STARTUP] Hand motion during warmup is NOT followed. '
+        if self.REZERO_ON_READY:
+            self.get_logger().info('[STARTUP] Robot targets stay held during warmup. '
+                                   'Current hands are zeroed when ready; WAIT_START X+A also rezeros hands.')
+        else:
+            self.get_logger().info('[STARTUP] Hand motion during warmup is NOT followed. '
                                'If it exceeds the existing alignment window, targets stay held; '
                                'after [XR RESUME WAIT_START], realign and press a fresh X+A. '
                                'No calibration reset and no automatic catch-up motion.')
@@ -134,9 +139,13 @@ class XRExtensionPublisher(XRResumePublisher):
                     now = time.monotonic()
                     if any(now - self._command_rx.get(s, -1e9) > 0.5 for s in SIDES):
                         raise ValueError('Cyclo command feedback stale at startup confirmation')
+                    if self.REZERO_ON_READY:
+                        self._require_still_robot(now)
+                        self._rezero_start_inputs(inputs, actual, 'X+A confirmation')
                     if not self._operator_start_aligned(inputs, actual):
                         self._event('CONFIRM_REFUSED', 'return both hands to ORIGINAL mapping '
-                                    'within 20mm/10deg; robot stays held, no new calibration')
+                                    f'within {self._session.position_tolerance_m*1000:g}mm/'
+                                    f'{self._session.rotation_tolerance_deg:g}deg; robot stays held, no new calibration')
                         return
                     self._require_still_robot(now)
                     # [FIX] No _capture(), no new goals, and no reactivate edge:
@@ -146,7 +155,9 @@ class XRExtensionPublisher(XRResumePublisher):
                     self._last_input = deepcopy(inputs)
                     self._last_pub = now
                     self._phase = 'ACTIVE'
-                    self._event('READY', 'manual X+A confirmed original mapping; move arms now')
+                    self._event('READY', ('manual X+A re-zeroed current hands; move arms now'
+                                         if self.REZERO_ON_READY else
+                                         'manual X+A confirmed original mapping; move arms now'))
                 except Exception as error:
                     self._set_arm_control_enabled(False, f'extension startup guard: {error}')
             return
@@ -193,8 +204,14 @@ class XRExtensionPublisher(XRResumePublisher):
                     self._first_command_rx.clear()
                     self._publish_reactivate(True, 'stationary extension startup; human motion held')
                 elif self._phase == 'WARMUP' and len(self._first_command_rx) == 2:
-                    if now - max(self._first_command_rx.values()) >= 8.0:
-                        if self._startup_reconfirm:
+                    if now - max(self._first_command_rx.values()) >= self.WARMUP_HOLD_SECONDS:
+                        if self.REZERO_ON_READY:
+                            self._rezero_start_inputs(inputs, actual, 'startup ready')
+                            self._startup_reconfirm = False
+                            self._wait_start_at = None
+                            self._phase = 'ACTIVE'
+                            self._event('READY', 'current hands zeroed to held robot targets; move arms now')
+                        elif self._startup_reconfirm:
                             self._phase = 'WAIT_START'
                             self._wait_start_at = now
                             self.arm_start_armed = False  # Require release after this phase transition.
@@ -204,13 +221,17 @@ class XRExtensionPublisher(XRResumePublisher):
                         else:
                             self._session.require_alignment(inputs, actual)
                             self._phase = 'ACTIVE'
-                            self._event('READY', 'startup outputs observed and 8s ramp hold complete; move arms now')
+                            self._event(
+                                'READY',
+                                f'startup outputs observed and {self.WARMUP_HOLD_SECONDS:g}s '
+                                'ramp hold complete; move arms now')
                 if now - self._startup_log_at >= 1.0 and self._phase != 'ACTIVE':
                     self._startup_log_at = now
                     errors = ' '.join(f"{s}={d['align_position_m']*1000:.1f}mm/"
                                       f"{d['align_rotation_deg']:.1f}deg"
                                       for s, d in self._diagnostics.items())
-                    remaining = (f"ramp_remaining={max(0., 8.0-(now-max(self._first_command_rx.values()))):.1f}s"
+                    remaining = (
+                        f"ramp_remaining={max(0., self.WARMUP_HOLD_SECONDS-(now-max(self._first_command_rx.values()))):.1f}s"
                                  if len(self._first_command_rx) == 2 else 'waiting_for_both_Cyclo_outputs')
                     self.get_logger().info(f'[XR STARTUP] {self._phase} {remaining} '
                                            f'input_aligned={aligned} {errors}; goals HELD')

@@ -199,7 +199,10 @@ def main():
         return 1
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # [CHANGED] ROS signal handlers may have already shut the context down
+        # on Ctrl+C; avoid an unrelated secondary RCLError traceback.
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

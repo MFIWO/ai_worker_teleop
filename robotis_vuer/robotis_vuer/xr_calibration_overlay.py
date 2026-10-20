@@ -55,7 +55,8 @@ def panel_position(head):
 
 
 def overlay_state(session, inputs, measured, phase, fresh, head=None,
-                  held=None, fault=False, ramp_remaining=None, reason=''):
+                  held=None, fault=False, ramp_remaining=None, reason='', reanchor_on_resume=False,
+                  manual_fault_reset=False):
     """Build display-only data. Green means pose aligned, NOT authorization.
 
     On startup the marker represents the held goal; otherwise it represents
@@ -69,7 +70,11 @@ def overlay_state(session, inputs, measured, phase, fresh, head=None,
         state['message'] = 'TRACKING / ROBOT FEEDBACK MISSING\nTargets hidden. Do not align to stale markers.'
         return state
     if fault:
-        state['message'] = 'CONTROLLER FAULT\nInspect controller log. X+A does not reset faults.'
+        state['message'] = ('FAULT - TELEOP OFF\nRelease X/A, then X+A to check/reset and resume.'
+                            if manual_fault_reset else
+                            'CONTROLLER FAULT\nInspect controller log. X+A does not reset faults.')
+        if reason:
+            state['message'] += '\nReason: ' + str(reason)
         return state
     if session is None:
         state['message'] = 'FIRST CALIBRATION\nHold a comfortable pose; release X/A, then X+A.\nWhite dots = tracked controller origins.'
@@ -78,13 +83,15 @@ def overlay_state(session, inputs, measured, phase, fresh, head=None,
         return state
 
     diagnostics = session.inspect(inputs, measured)
+    position_tolerance = session.position_tolerance_m
+    rotation_tolerance = session.rotation_tolerance_deg
     held_diagnostics = session.inspect(inputs, held) if held else diagnostics
     for side in SIDES:
         current = rigid_pose(inputs[side])
         reference = held[side] if held else measured[side]
         target = controller_pose_for_robot(session.mapper, side, reference)
         d, h = diagnostics[side], held_diagnostics[side]
-        matched = all(x['align_position_m'] <= .02 and x['align_rotation_deg'] <= 10.
+        matched = all(x['align_position_m'] <= position_tolerance and x['align_rotation_deg'] <= rotation_tolerance
                       and x['projection_m'] <= 1e-5 for x in (d, h))
         state['arms'][side] = {
             'current': current.tolist(), 'target': target.tolist(),
@@ -92,16 +99,31 @@ def overlay_state(session, inputs, measured, phase, fresh, head=None,
             'rotation_error_deg': d['align_rotation_deg'],
             'projection_mm': 1000 * d['projection_m'],
             'controller_distance_mm': 1000 * float(np.linalg.norm(target[:3, 3] - current[:3, 3])),
-            'tolerance_radius_m': .02 / session.mapper.scale,
+            'tolerance_radius_m': position_tolerance / session.mapper.scale,
         }
     all_matched = all(a['matched'] for a in state['arms'].values())
-    if phase in ('SETTLING', 'WARMUP'):
+    if phase == 'RESUME_SEED':
+        state['message'] = 'RESUME PREPARATION - ROBOT HELD\nPreparing measured start; keep hands still.'
+    elif phase in ('SETTLING', 'WARMUP'):
         remaining = '' if ramp_remaining is None else f'\nRamp remaining: {ramp_remaining:.1f} s'
         state['message'] = 'WARMUP - ROBOT HELD' + remaining + '\nKeep dots and axes on targets; do not move yet.'
+    elif phase == 'ALIGN_REQUIRED' and reanchor_on_resume:
+        for arm in state['arms'].values():
+            arm['target'] = None
+        state['message'] = ('STOPPED - TELEOP OFF\nReason: ' + str(reason) +
+                            '\nRelease X/A, then X+A to resume from CURRENT robot pose.'
+                            '\nNo return to previous hand pose. Keep hands still during startup.')
     elif phase in ('WAIT_START', 'ALIGN_REQUIRED'):
-        state['message'] = ('POSES ALIGNED - release X/A, then X+A' if all_matched else
+        state['message'] = ('STOPPED - TELEOP OFF\n' if phase == 'ALIGN_REQUIRED' else
+                            'ROBOT HELD - WAITING FOR START\n')
+        if reason:
+            state['message'] += 'Reason: ' + str(reason) + '\n'
+        state['message'] += ('POSES ALIGNED - release X/A, then X+A' if all_matched else
                             'ALIGN BOTH HANDS\nMatch white dots AND coloured axes to targets.')
-        state['message'] += '\nPose match only; controller checks still apply.'
+        state['message'] += f'\nResume requires BOTH hands within {position_tolerance*1000:g}mm / {rotation_tolerance:g}deg.'
+        state['message'] += '\n' + ' | '.join(
+            f"{'L' if side == 'left' else 'R'} {arm['robot_error_mm']:.1f}mm / {arm['rotation_error_deg']:.1f}deg"
+            for side, arm in state['arms'].items())
     elif phase == 'ACTIVE':
         state['message'] = 'ACTIVE - TELEOP\nY+B stops. Targets now show measured robot correspondence.'
     else:
@@ -127,7 +149,8 @@ def render_overlay(state):
     so stale green markers are actually removed, not just left on the scene.
     """
     from vuer.schemas import Billboard, Line, Sphere, Text, group
-    text_colour = '#ff7777' if not state['fresh'] or state['fault'] else '#ffffff'
+    text_colour = ('#ff7777' if not state['fresh'] or state['fault'] else
+                   '#ffb347' if state['phase'] == 'ALIGN_REQUIRED' else '#ffffff')
     children = [Billboard(Text(state['message'], key='cal-panel-text', color=text_colour,
                               fontSize=.022, maxWidth=.65, textAlign='center',
                               anchorX='center', anchorY='middle', outlineWidth=.001,

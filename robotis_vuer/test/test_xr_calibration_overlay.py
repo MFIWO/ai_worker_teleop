@@ -63,6 +63,34 @@ class OverlayMathTests(unittest.TestCase):
         self.assertAlmostEqual(state['arms']['left']['robot_error_mm'], 0.)
         self.assertAlmostEqual(state['arms']['left']['rotation_error_deg'], 11.)
 
+    def test_stopped_panel_shows_reason_and_rotation_blocking_resume(self):
+        hand = deepcopy(self.inputs)
+        hand['right'][:3, :3] = Rotation.from_euler('x', 23.4, degrees=True).as_matrix()
+        reason = 'hardware tracking guard: right: hardware commissioning tracking error >50mm/20deg'
+        state = overlay_state(self.session, hand, self.robots, 'ALIGN_REQUIRED', True, reason=reason)
+        self.assertIn('STOPPED - TELEOP OFF', state['message'])
+        self.assertIn(reason, state['message'])
+        self.assertIn('BOTH hands within 20mm / 10deg', state['message'])
+        self.assertIn('R 0.0mm / 23.4deg', state['message'])
+        self.assertNotIn('POSES ALIGNED', state['message'])
+        self.assertIn('cal-right-target', json.dumps(render_overlay(state)._serialize()))
+
+    def test_stopped_aligned_panel_requires_fresh_start_press(self):
+        state = overlay_state(self.session, self.inputs, self.robots, 'ALIGN_REQUIRED', True,
+                              reason='Y+B buttons')
+        self.assertIn('STOPPED - TELEOP OFF', state['message'])
+        self.assertIn('release X/A, then X+A', state['message'])
+        self.assertNotIn('ACTIVE - TELEOP', state['message'])
+
+    def test_measured_resume_panel_hides_old_alignment_targets(self):
+        hand=deepcopy(self.inputs)
+        hand['left'][0,3]+=.2
+        state=overlay_state(self.session,hand,self.robots,'ALIGN_REQUIRED',True,
+                            reason='Y+B buttons',reanchor_on_resume=True)
+        self.assertIn('X+A to resume from CURRENT robot pose',state['message'])
+        self.assertIsNone(state['arms']['left']['target'])
+        self.assertNotIn('ALIGN BOTH HANDS',state['message'])
+
     def test_two_centimetre_gate_not_visual_sphere_size_heuristic(self):
         for delta, expected in ((.0199, True), (.0201, False)):
             hand = deepcopy(self.inputs); hand['left'][0, 3] += delta
@@ -169,6 +197,15 @@ class GuidedNodeTests(unittest.TestCase):
         self.assertTrue(a['arms']['left']['matched'])
         self.assertEqual(self.node.published_pairs, count)
         self.assertEqual(self.node._phase, 'WAIT_START')
+
+    def test_warmup_panel_uses_selected_publisher_ramp_duration(self):
+        from unittest.mock import patch
+        self.node._phase = 'WARMUP'
+        self.node.WARMUP_HOLD_SECONDS = 1.
+        self.node._first_command_rx = {'left': 10., 'right': 10.}
+        with patch('robotis_vuer.vr_publisher_sg2_xr_guided.time.monotonic', return_value=10.5):
+            state = self.node._overlay_snapshot()
+        self.assertAlmostEqual(state['ramp_remaining'], .5)
 
     def test_all_control_methods_inherited_without_changes(self):
         from robotis_vuer.vr_publisher_sg2_xr_extension import XRExtensionPublisher

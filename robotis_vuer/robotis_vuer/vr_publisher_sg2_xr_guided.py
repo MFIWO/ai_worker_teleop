@@ -50,9 +50,12 @@ class XRGuidedPublisher(XRExtensionPublisher):
             held = deepcopy(self._goals) if phase in ('SETTLING', 'WARMUP', 'WAIT_START') else None
             remaining = None
             if phase == 'WARMUP' and len(self._first_command_rx) == 2:
-                remaining = max(0., 8.0 - (time.monotonic() - max(self._first_command_rx.values())))
+                remaining = max(0., self.WARMUP_HOLD_SECONDS -
+                                (time.monotonic() - max(self._first_command_rx.values())))
         return overlay_state(session, inputs, measured, phase, fresh, head,
-                             held=held, fault=fault, ramp_remaining=remaining, reason=reason)
+                             held=held, fault=fault, ramp_remaining=remaining, reason=reason,
+                             reanchor_on_resume=self.REANCHOR_ON_RESUME,
+                             manual_fault_reset=self.MANUAL_FAULT_RESET)
 
     async def main_hand_tracking(self, session):
         # [CHANGED VIEW ONLY] Same stream components; hide the body skeleton to

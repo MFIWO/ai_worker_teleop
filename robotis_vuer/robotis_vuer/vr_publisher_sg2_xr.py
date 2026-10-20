@@ -42,9 +42,12 @@ def pose_matrix(pose):
 
 
 class XRDeltaPublisher(VRTrajectoryPublisher):
+    RECEIPT_TIME_ONLY = False
     # [ADDED 2026-10-14] Explicit opt-in subclass hooks. Legacy defaults unchanged.
     DEFAULT_GOAL_SPEED = 0.20
     DEFAULT_ANGULAR_SPEED = 1.0
+    MAX_GOAL_SPEED = 0.30
+    MAX_ANGULAR_SPEED = 1.5
 
     def _validate_runtime_domain(self):
         if os.environ.get('ROS_DOMAIN_ID') not in ('231', '232'):
@@ -56,6 +59,7 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
         self._xr_lock = threading.RLock()
         self._mapper = None
         self._robot_poses = {}
+        self._pose_sources = {}
         self._joint_rx = None
         self._last_pub = None
         self._last_input = {}
@@ -95,13 +99,18 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
         self.angular_speed = float(self.declare_parameter('xr_angular_speed', self.DEFAULT_ANGULAR_SPEED).value)
         if not 0.1 <= self.translation_scale <= 1.5:
             raise ValueError('xr_translation_scale must be in [0.1,1.5]')
-        if not 0.02 <= self.goal_speed <= 0.30 or not 0.1 <= self.angular_speed <= 1.5:
-            raise ValueError('xr_goal_speed in [0.02,0.30], xr_angular_speed in [0.1,1.5] required')
+        if (not 0.02 <= self.goal_speed <= self.MAX_GOAL_SPEED
+                or not 0.1 <= self.angular_speed <= self.MAX_ANGULAR_SPEED):
+            raise ValueError(
+                f'xr_goal_speed in [0.02,{self.MAX_GOAL_SPEED}], '
+                f'xr_angular_speed in [0.1,{self.MAX_ANGULAR_SPEED}] required')
         self._xr_ready = True
         self._set_arm_control_enabled(False, 'XR mode startup; manual calibration required')
         self.get_logger().info(
             '[XR MODE] Original offsets/scales are NOT used. X+A captures measured wrists; '
-            'Y+B stops. Fixed horizontal heading; independent wrist deltas; no fingers/base/lift/head. '
+            'Y+B stops. Fixed horizontal heading; independent wrist deltas. '
+            + ('SG2 sticks/triggers are routed by the hardware subclass. ' if getattr(self, 'hardware_model', '') == 'sg2'
+               else 'No fingers/base/lift/head commands. ') +
             'Cyclo launch must include arm:=false. Keep the controller startup checks enabled.')
         if start_server:
             super().start_vuer_server()
@@ -136,10 +145,13 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
                     raise ValueError('controller EE pose must use base_link')
                 stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
                 age = self.get_clock().now().nanoseconds * 1e-9 - stamp
-                if not -0.1 <= age <= 0.5:
+                if not self.RECEIPT_TIME_ONLY and not -0.1 <= age <= 0.5:
                     raise ValueError('stale controller EE feedback timestamp')
+                if self.RECEIPT_TIME_ONLY and stamp <= self._pose_sources.get(side, -float('inf')):
+                    return
                 matrix = pose_matrix(msg.pose)
                 self._robot_poses[side] = (matrix, time.monotonic(), stamp)
+                self._pose_sources[side] = stamp
             except ValueError:
                 self._robot_poses.pop(side, None)
 
@@ -158,7 +170,13 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
         tf = self.tf_buffer.lookup_transform('base_link', link, Time())
         stamp = tf.header.stamp.sec + tf.header.stamp.nanosec * 1e-9
         age = self.get_clock().now().nanoseconds * 1e-9 - stamp
-        if not -0.1 <= age <= 0.5:
+        if self.RECEIPT_TIME_ONLY:
+            # Receipt is recorded by the actual /tf callback, never a lookup
+            # of a cached transform (reading cache must not refresh liveness).
+            _, receipt = getattr(self, '_tf_receipts', {}).get(link, (-float('inf'), -float('inf')))
+            if time.monotonic() - receipt > .5:
+                raise ValueError(f'TF updates stopped for {link}')
+        elif not -0.1 <= age <= 0.5:
             raise ValueError(f'stale TF for {link}: {age:.3f}s')
         p, q = tf.transform.translation, tf.transform.rotation
         msg = PoseStamped()

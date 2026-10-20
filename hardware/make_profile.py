@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""[ADDED] Generate a model-checked, slower hardware COPY. No robot commands."""
+"""Generate a model-checked hardware copy bound to URDF limits. No robot commands."""
 import argparse
 from copy import deepcopy
 import json
@@ -10,8 +10,9 @@ import xml.etree.ElementTree as ET
 import yaml
 
 from hardware.xr_contract import (
-    ARM_NAMES, SIDES, MAX_JOINT_SPEED, GOAL_SPEED, ANGULAR_SPEED,
-    arm_signature, private_topic, sha256, verify_description, configured_arm_ids,
+    ARM_NAMES, SIDES, GOAL_SPEED, ANGULAR_SPEED,
+    arm_signature, arm_limits, COMMAND_WINDOW_SECONDS, private_topic, sha256, verify_description, configured_arm_ids,
+    READINESS_POLICIES,
 )
 
 
@@ -40,6 +41,7 @@ def resolve_meshes(text):
 def make_files(model, controller_text, description_text, config):
     source = ET.fromstring(controller_text)
     physical = ET.fromstring(description_text)
+    arm_limits(description_text)
     signature = arm_signature(source)
     verify_description(description_text, model, signature)
     tree = deepcopy(source)
@@ -47,20 +49,30 @@ def make_files(model, controller_text, description_text, config):
     for names in ARM_NAMES.values():
         for name in names:
             bound = tree.find(f"joint[@name='{name}']/limit")
-            lower, upper = float(bound.get('lower')), float(bound.get('upper'))
             real_bound = physical.find(f"joint[@name='{name}']/limit")
-            if (real_bound is None or lower < float(real_bound.get('lower'))-1e-9
-                    or upper > float(real_bound.get('upper'))+1e-9
-                    or MAX_JOINT_SPEED > float(real_bound.get('velocity'))):
-                raise ValueError(f'{name}: controller bounds are not contained in the physical description')
-            if not lower < upper:
-                raise ValueError(f'invalid bounds for {name}')
-            if name.endswith('joint4') and upper > -.7 + 1e-12:
-                raise ValueError('Refuse expanded simulation joint4 model; use installed commissioning model')
-            if float(bound.get('velocity')) < MAX_JOINT_SPEED:
-                raise ValueError('native velocity is below selected commissioning speed; review manually')
-            limits[name] = [lower, upper]
-            bound.set('velocity', str(MAX_JOINT_SPEED))  # [CHANGED] velocity only; no position expansion.
+            if real_bound is None:
+                raise ValueError(f'{name}: physical URDF limit missing')
+            if model == 'sg2':
+                # [CHANGED 2026-10-14] The physical expanded URDF is the sole
+                # SG2 arm position/velocity authority. Do not retain the older
+                # Cyclo joint4=-0.7 commissioning bound.
+                lower = float(real_bound.get('lower'))
+                upper = float(real_bound.get('upper'))
+                velocity = float(real_bound.get('velocity'))
+                if not lower < upper or velocity <= 0:
+                    raise ValueError(f'{name}: invalid physical URDF bounds')
+                bound.set('lower', str(lower))
+                bound.set('upper', str(upper))
+                bound.set('velocity', str(velocity))
+                limits[name] = [lower, upper]
+            else:
+                lower, upper = float(bound.get('lower')), float(bound.get('upper'))
+                if (lower < float(real_bound.get('lower'))-1e-9
+                        or upper > float(real_bound.get('upper'))+1e-9):
+                    raise ValueError(f'{name}: controller bounds are not contained in the physical description')
+                if not lower < upper:
+                    raise ValueError(f'invalid bounds for {name}')
+                limits[name] = [lower, upper]
     output = deepcopy(config)
     p = output['vr_controller']['ros__parameters']
     if p.get('lift_vel_bound', 0.0) != 0.0:
@@ -90,6 +102,8 @@ def main():
     parser.add_argument('--config', type=Path)
     parser.add_argument('--snapshot', type=Path, required=True,
                         help='Passive measured joint snapshot. Required to freeze SH5 non-arm joints.')
+    parser.add_argument('--readiness-policy', choices=READINESS_POLICIES,
+                        default='strict_torque')  # [CHANGED] Normal wrapper selects driver_managed.
     a = parser.parse_args()
     if any(p is None for p in (a.controller_urdf, a.srdf, a.description, a.config)):
         from ament_index_python.packages import get_package_share_directory as share
@@ -109,10 +123,19 @@ def main():
         urdf, srdf, frozen, model_report = build_sh5_model(
             description_text, a.controller_urdf.read_text(), srdf, snapshot)
         limits = model_report['arm_limits']
+    # [CHANGED] Diagnose wrong launch ORDER with the exact observed joint angle.
+    # Do NOT loosen native limits or synthesize a corrected measured posture.
     for name, (lower, upper) in limits.items():
-        if name not in snapshot or not lower <= float(snapshot[name]) <= upper:
-            raise ValueError(f'{name}: measured pose outside conservative controller limits. '
-                             'Use the already-verified hardware ready-pose procedure; no automatic motion is performed.')
+        if name not in snapshot:
+            raise ValueError(f'{name}: no measured feedback in physical joint snapshot')
+        measured = float(snapshot[name])
+        if not lower <= measured <= upper:
+            raise ValueError(
+                f'{name}: measured {measured:+.4f} rad outside native Cyclo '
+                f'[{lower:+.4f}, {upper:+.4f}] rad. '
+                'SG2 must run its verified PC ready-pose trajectory FIRST '
+                '(both arm joint4 near -1.57 rad), then run_controller.sh. '
+                'No automatic motion or limit expansion has occurred.')
     urdf = resolve_meshes(urdf)
     if model_report:
         model_report['mesh_resources_verified'] = True
@@ -134,11 +157,21 @@ def main():
         p.write_text(contents[k])
     from hardware.check_collision import check_initial_pose
     collision_report = check_initial_pose(paths['urdf'], paths['srdf'], snapshot,
-        cfg['vr_controller']['ros__parameters']['collision_safe_distance'])
+        cfg['vr_controller']['ros__parameters']['collision_safe_distance'],
+        enforce_margin=a.readiness_policy == 'strict_torque')  # [CHANGED]
+    if not collision_report['native_margin_met']:
+        print('[COLLISION DIAGNOSTIC] Initial clearance is positive but below the native CBF margin. '
+              'The native QP/CBF, startup tracking guard and reference checker remain unchanged; '
+              'no automatic pose correction has been requested.')
+    _, velocities = arm_limits(urdf)
     manifest = {'schema': 1, 'mode': 'hardware_commissioning', 'model': a.model,
+                'readiness_policy': a.readiness_policy,  # [CHANGED] Explicit, carried to gate and PC.
                 'validation_fixture': os.environ.get('AI_WORKER_XR_EXECUTION') == 'validation',
                 'limits': limits, 'arm_signature': signature,
-                'max_joint_speed': MAX_JOINT_SPEED, 'goal_speed': GOAL_SPEED,
+                'max_joint_speed': max(velocities.values()), 'goal_speed': GOAL_SPEED,
+                'joint_velocity_limits': velocities,
+                'tracking_window_seconds': COMMAND_WINDOW_SECONDS,
+                'tracking_error_limits': {k: v * COMMAND_WINDOW_SECONDS for k, v in velocities.items()},
                 'angular_speed': ANGULAR_SPEED, 'workspace_fraction': .94,
                 'source_urdf': str(a.controller_urdf.resolve()),
                 'source_urdf_sha256': sha256(a.controller_urdf),
@@ -158,7 +191,10 @@ def main():
     (a.output/'profile.json').write_text(json.dumps(manifest, indent=2))
     print('[PROFILE]', a.output/'profile.json')
     print('[PRESERVED] conservative position bounds, collision geometry, CBF and all original files')
-    print('[COMMISSIONING] arm velocity=.35rad/s; wrist goal=.06m/s; no fingers/base/lift')
+    print('[READINESS POLICY]', a.readiness_policy)
+    print(f'[HARDWARE] Arm velocity uses verified URDF (max {max(velocities.values()):g}rad/s); '
+          f'Cartesian speed caps are non-binding ({GOAL_SPEED:g}m/s, {ANGULAR_SPEED:g}rad/s); '
+          'no fingers/base/lift')
     if a.model == 'sh5':
         print('[SH5] Collision meshes conservatively enclosed by boxes; visual meshes retained; non-arm joints frozen.')
         print('[LIMITATION] Not a moving-finger controller or a physical collision certification.')

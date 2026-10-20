@@ -7,6 +7,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     PYTHONPATH=/root/vuer/src
 
+# [ADDED 2026-10-14] The bind-mounted MFIWO ready mover needs these ROS messages.
+# chrony serves the synchronised host clock only when start_time_server_pc.sh uses -x.
 RUN apt-get update && \
     apt-get install -y ros-${ROS_DISTRO}-rmw-zenoh-cpp && \
     apt-get install -y --no-install-recommends \
@@ -14,6 +16,11 @@ RUN apt-get update && \
     curl \
     vim \
     nano \
+    chrony \
+    iproute2 \
+    ros-${ROS_DISTRO}-control-msgs \
+    ros-${ROS_DISTRO}-action-msgs \
+    ros-${ROS_DISTRO}-dynamixel-interfaces \
     libnss3-tools \
     python3-pip \
     python3-colcon-common-extensions && \

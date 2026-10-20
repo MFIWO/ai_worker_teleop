@@ -19,7 +19,9 @@ class FixedResumeSession:
     elbows. Segment lengths and original target mapping are NOT recaptured.
     """
 
-    def __init__(self, head, inputs, robots, links, scale):
+    def __init__(self, head, inputs, robots, links, scale, position_m=.02, rotation_deg=10.):
+        self.position_tolerance_m = position_m
+        self.rotation_tolerance_deg = rotation_deg
         self.mapper = CalibratedWristMapper(head, inputs, robots, scale)
         self.templates = {
             side: ContinuousElbowHint(links[side]['shoulder'][:3, 3],
@@ -49,12 +51,14 @@ class FixedResumeSession:
             }
         return result
 
-    def require_alignment(self, inputs, robots, position_m=0.02, rotation_deg=10.0):
+    def require_alignment(self, inputs, robots, position_m=None, rotation_deg=None):
         """A fresh X+A is not permission to jump, chase a stale goal or reclutch.
 
         Comparison uses UNPROJECTED targets. Clipping a far-away human hand
         onto the current robot pose must not make a restart appear aligned.
         """
+        position_m = self.position_tolerance_m if position_m is None else position_m
+        rotation_deg = self.rotation_tolerance_deg if rotation_deg is None else rotation_deg
         result = self.inspect(inputs, robots)
         bad = {s: x for s, x in result.items()
                if x['align_position_m'] > position_m or x['align_rotation_deg'] > rotation_deg
