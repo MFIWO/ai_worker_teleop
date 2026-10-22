@@ -37,6 +37,13 @@ def optical_wrist(data):
 
 
 class SH5SimulationPublisher(XROverheadPublisher):
+    TRACKING_JUMP_POSITION_M = 0.30
+    WORKSPACE_FRACTION = 1.0
+    ENFORCE_SHOULDER_STATIONARITY = False
+    # Match hardware: no extra Cartesian following-error shutdown.
+    # Physical position/velocity limits remain in the QP and SimulationBridge.
+    TRACKING_POSITION_LIMIT_M = float('inf')
+    TRACKING_ROTATION_LIMIT_RAD = float('inf')
     # Requested 10x software limits; physical URDF bounds remain unchanged.
     DEFAULT_GOAL_SPEED = 2.0
     DEFAULT_ANGULAR_SPEED = 10.0
@@ -83,11 +90,17 @@ class SH5SimulationPublisher(XROverheadPublisher):
         if start_server:
             self.start_vuer_server()
 
+    def _command_feedback(self, msg, side):
+        # SH5 uses physical URDF bounds in the controller and simulation relay.
+        # Skip SG2 near-extension's unrelated q4 <= -0.45 rad experiment check,
+        # while retaining message validation and startup/feedback timestamps.
+        XRResumePublisher._command_feedback(self, msg, side)
+
     def _log_extension_mode(self):
         self.get_logger().info('[SH5 SIM] Original arm limits, measured wrists, elbow cost 0; no SG2 extension model')
 
     def _log_path_mode(self):
-        self.get_logger().info('[SH5 SIM] Existing calibrated wrist-delta and anchor-ray workspace')
+        self.get_logger().info('[SH5 SIM] Existing wrist-delta; full geometric reach minus 10um; physical QP limits retained')
 
     def _bridge_feedback(self, msg):
         try:
@@ -166,11 +179,27 @@ class SH5SimulationPublisher(XROverheadPublisher):
 
     async def on_hand_move(self, event, session):
         value = getattr(event, 'value', None)
-        if not isinstance(value, dict):
-            return
         with self._xr_lock:
+            # A partial HAND_MOVE is missing input, not a command to stop.
+            # Validate both hands before advancing any receipt time or output.
             try:
+                if not isinstance(value, dict):
+                    raise ValueError('expected both optical hands')
                 wrists = {s: optical_wrist(value[s]) for s in SIDES}
+            except (KeyError, ValueError, TypeError, OverflowError) as error:
+                self._gesture_start = None
+                self._gesture_latched = False
+                self._hand_previous = dict.fromkeys(SIDES)
+                now = time.monotonic()
+                if now - getattr(self, '_invalid_hand_log_at', -1e9) >= 2.:
+                    self.get_logger().warning(
+                        '[SH5 INPUT DROP] Ignoring incomplete/invalid hand frame; '
+                        'last valid targets retained, input timeout unchanged: ' + str(error))
+                    self._invalid_hand_log_at = now
+                # Do not clear OR refresh _hand_rx / controller receipts.
+                # Persistent loss expires through the existing tracking watchdog.
+                return
+            try:
                 now = time.monotonic()
                 self._hand_samples = {s: value[s] for s in SIDES}
                 self._hand_rx = {s: now for s in SIDES}

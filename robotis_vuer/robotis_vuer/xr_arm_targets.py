@@ -113,7 +113,7 @@ class ContinuousElbowHint:
     all those constraints. The nearest previous bend plane is preserved.
     """
 
-    def __init__(self, shoulder, elbow, wrist):
+    def __init__(self, shoulder, elbow, wrist, workspace_fraction=.94):
         self.shoulder = self._point(shoulder)
         self.previous = self._point(elbow)
         wrist = self._point(wrist)
@@ -125,8 +125,10 @@ class ContinuousElbowHint:
         self.minimum = abs(self.upper - self.forearm) + 0.01
         if d0 < self.minimum:
             raise ValueError('captured wrist is too close to the shoulder; use a non-folded startup pose')
-        # Conservative outer shell, preserving the captured pose exactly.
-        self.maximum = max(d0, 0.94 * (self.upper + self.forearm))
+        if not math.isfinite(workspace_fraction) or not 0 < workspace_fraction <= 1.:
+            raise ValueError('workspace_fraction must be finite and within (0, 1]')
+        # Model-selected reach; retain the existing 10 micrometre singularity margin.
+        self.maximum = max(d0, workspace_fraction * (self.upper + self.forearm))
         self.maximum = min(self.maximum, self.upper + self.forearm - 1e-5)
         if d0 > self.maximum:
             raise ValueError('captured arm is fully straight/singular; bend the elbow before calibration')

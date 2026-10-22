@@ -19,13 +19,15 @@ class FixedResumeSession:
     elbows. Segment lengths and original target mapping are NOT recaptured.
     """
 
-    def __init__(self, head, inputs, robots, links, scale, position_m=.02, rotation_deg=10.):
+    def __init__(self, head, inputs, robots, links, scale, position_m=.02, rotation_deg=10.,
+                 workspace_fraction=.94):
         self.position_tolerance_m = position_m
         self.rotation_tolerance_deg = rotation_deg
         self.mapper = CalibratedWristMapper(head, inputs, robots, scale)
         self.templates = {
             side: ContinuousElbowHint(links[side]['shoulder'][:3, 3],
-                                      links[side]['elbow'][:3, 3], robots[side][:3, 3])
+                                      links[side]['elbow'][:3, 3], robots[side][:3, 3],
+                                      workspace_fraction=workspace_fraction)
             for side in ('left', 'right')
         }
 
@@ -71,12 +73,13 @@ class FixedResumeSession:
             raise ValueError('ALIGN_REQUIRED (original calibration retained): ' + detail)
         return result
 
-    def fresh_hints(self, links):
+    def fresh_hints(self, links, enforce_shoulder_stationarity=True):
         hints = deepcopy(self.templates)
         for side, hint in hints.items():
             # The bridge is arms-only. A moved shoulder/base/lift invalidates
             # this session rather than silently redefining its workspace.
-            if np.linalg.norm(links[side]['shoulder'][:3, 3] - hint.shoulder) > 0.005:
+            if (enforce_shoulder_stationarity and
+                    np.linalg.norm(links[side]['shoulder'][:3, 3] - hint.shoulder) > 0.005):
                 raise ValueError('shoulder/base moved; restart publisher for a new calibration')
             hint.previous = links[side]['elbow'][:3, 3].copy()
             hint.last_bend = None

@@ -30,7 +30,7 @@ from hardware.aux_controls import AUX_TOPICS, JOINT_GROUPS, GRIPPERS, validate_a
 
 from hardware.xr_contract import (
     ARM_NAMES, SIDES, FOLLOWER_TOPICS, GATE_NAME, PC_NAME, LEASE_SECONDS,
-    check_positions, check_step, limit_step, load_profile, private_topic, verify_description,
+    check_positions, arm_position_tolerance, check_step, limit_step, load_profile, private_topic, verify_description,
     motor_health, motor_read_health, configured_arm_ids, motor_readiness,
 )
 from hardware.torque_evidence import TorqueEvidence
@@ -229,7 +229,8 @@ class HardwareCommandGate(Node):
             if (len(msg.points) != 1 or msg.points[0].time_from_start.sec != 0
                     or msg.points[0].time_from_start.nanosec != 0):
                 raise ValueError('expected one native immediate Cyclo setpoint (time_from_start=0)')
-            target = check_positions(side, msg.joint_names, msg.points[-1].positions, self.profile['limits'])
+            target = check_positions(side, msg.joint_names, msg.points[-1].positions,
+                                     self.profile['limits'], arm_position_tolerance(self.model))
             self.commands[side] = (target, time.monotonic())
         except (ValueError, TypeError) as error:
             if self.intent_enabled:

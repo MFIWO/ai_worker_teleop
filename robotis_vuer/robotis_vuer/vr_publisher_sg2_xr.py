@@ -43,6 +43,9 @@ def pose_matrix(pose):
 
 class XRDeltaPublisher(VRTrajectoryPublisher):
     RECEIPT_TIME_ONLY = False
+    ENFORCE_SHOULDER_STATIONARITY = True
+    TRACKING_JUMP_POSITION_M = 0.15
+    TRACKING_JUMP_ROTATION_RAD = 1.2
     FEEDBACK_MAX_AGE = 0.5
     ARM_TRACKING_TIMEOUT = 0.5
     # [ADDED 2026-10-14] Explicit opt-in subclass hooks. Legacy defaults unchanged.
@@ -194,6 +197,23 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
                             for role, number in (('shoulder', 2), ('elbow', 4), ('wrist', 7))}
         return result
 
+    def _check_shoulder_stationarity(self, links, side, hint, context):
+        displacement = float(np.linalg.norm(links[side]['shoulder'][:3, 3] - hint.shoulder))
+        if not np.isfinite(displacement):
+            raise ValueError(f'{side}: nonfinite shoulder displacement')
+        if displacement <= .005:
+            return
+        if self.ENFORCE_SHOULDER_STATIONARITY:
+            raise ValueError(f'shoulder/base moved during {context}; inspect and recalibrate')
+        # SH5: report the old 5 mm condition without stopping or changing anchors.
+        warned = getattr(self, '_shoulder_drift_warned', set())
+        if side not in warned:
+            self.get_logger().warning(
+                f'[SH5 SHOULDER DRIFT] {side} {displacement * 1000:.1f}mm during {context}; '
+                '5mm stop disabled; original wrist mapping/workspace retained')
+            warned.add(side)
+            self._shoulder_drift_warned = warned
+
     def _graph_check(self):
         for short in SIDES.values():
             for topic in (f'/{short}_goal_pose', f'/{short}_subgoal_pose'):
@@ -305,9 +325,17 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
                     matrix = rigid_pose(raw)
                     if self.arm_control_enabled and side in self._last_input:
                         old = self._last_input[side]
-                        if (np.linalg.norm(matrix[:3, 3] - old[:3, 3]) > 0.15
-                                or Rotation.from_matrix(matrix[:3, :3] @ old[:3, :3].T).magnitude() > 1.2):
-                            raise ValueError('tracking jump; release X/A and recalibrate')
+                        delta_position = float(np.linalg.norm(matrix[:3, 3] - old[:3, 3]))
+                        delta_rotation = float(Rotation.from_matrix(
+                            matrix[:3, :3] @ old[:3, :3].T).magnitude())
+                        if (delta_position > self.TRACKING_JUMP_POSITION_M
+                                or delta_rotation > self.TRACKING_JUMP_ROTATION_RAD):
+                            raise ValueError(
+                                f'tracking jump ({side}): position={delta_position:.4f}m '
+                                f'(limit={self.TRACKING_JUMP_POSITION_M:g}m), '
+                                f'rotation={np.degrees(delta_rotation):.1f}deg '
+                                f'(limit={np.degrees(self.TRACKING_JUMP_ROTATION_RAD):.1f}deg); '
+                                'release start gesture and recalibrate')
                     setattr(self, f'{side}_controller_matrix', matrix)
                     self.last_controller_pose_sec[side] = now
                 except (KeyError, TypeError, ValueError) as error:

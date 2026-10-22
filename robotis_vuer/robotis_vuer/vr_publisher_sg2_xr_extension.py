@@ -107,8 +107,7 @@ class XRExtensionPublisher(XRResumePublisher):
         actual = {s: links[s]['wrist'] for s in SIDES}
         self._diagnostics = self._session.inspect(inputs, actual)
         for side, hint in self._session.templates.items():
-            if np.linalg.norm(links[side]['shoulder'][:3, 3] - hint.shoulder) > 0.005:
-                raise ValueError('shoulder/base moved during startup')
+            self._check_shoulder_stationarity(links, side, hint, 'startup')
             dp = np.linalg.norm(self._goals[side][:3, 3] - actual[side][:3, 3])
             dr = Rotation.from_matrix(self._goals[side][:3, :3] @ actual[side][:3, :3].T).magnitude()
             if dp > 0.02 or dr > np.deg2rad(10):

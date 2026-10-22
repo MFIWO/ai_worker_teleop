@@ -22,7 +22,7 @@ from std_srvs.srv import Trigger
 
 from hardware.xr_contract import (
     ARM_NAMES, SIDES, FOLLOWER_TOPICS, GATE_NAME, PC_NAME,
-    GOAL_SPEED, ANGULAR_SPEED, COMMAND_WINDOW_SECONDS, private_topic, check_positions,
+    GOAL_SPEED, ANGULAR_SPEED, COMMAND_WINDOW_SECONDS, private_topic, check_positions, arm_position_tolerance,
     validate_readiness_policy,
 )
 from hardware.aux_controls import GRIPPERS, BASE_LIMITS
@@ -91,6 +91,7 @@ class HardwareXRPublisher(XROverheadPublisher):
         self.hardware_model = os.environ.get('AI_WORKER_XR_MODEL', '')
         if self.hardware_model not in ('sg2', 'sh5'):
             raise ValueError('Select sg2 or sh5 explicitly; never infer from available topics')
+        self.WORKSPACE_FRACTION = 1.0 if self.hardware_model == 'sh5' else .94
         self.hardware_allow_arm = os.environ.get('AI_WORKER_XR_ALLOW_ARM') == '1'
         # [CHANGED] Main PC wrapper selects normal mode. Older callers remain
         # strict, and a mismatched PC/robot policy cannot silently activate.
@@ -156,7 +157,7 @@ class HardwareXRPublisher(XROverheadPublisher):
 
     def _log_extension_mode(self):
         self.get_logger().info(f'[HARDWARE] {self.hardware_model.upper()} original joint bounds; '
-                               'measured .94 workspace; SG2 sticks/triggers through hardware gate.')
+                               f'measured workspace fraction={self.WORKSPACE_FRACTION:g}; SG2 sticks/triggers through hardware gate.')
 
     def _tf_received(self, msg):
         now = time.monotonic()
@@ -298,7 +299,7 @@ class HardwareXRPublisher(XROverheadPublisher):
         try:
             p = json.loads(future.result().values[0].string_value)
             if (p['schema'] != 1 or p['mode'] != 'hardware_commissioning' or p['model'] != self.hardware_model
-                    or p['workspace_fraction'] != .94
+                    or p['workspace_fraction'] != self.WORKSPACE_FRACTION
                     or p['goal_speed'] != GOAL_SPEED
                     or p.get('time_policy') != 'local_monotonic_receipt'
                     or p.get('readiness_policy', 'strict_torque') != self.hardware_readiness_policy):
@@ -563,7 +564,7 @@ class HardwareXRPublisher(XROverheadPublisher):
                 if not msg.points:
                     raise ValueError('empty gated command')
                 check_positions(side, msg.joint_names, msg.points[-1].positions,
-                                self._hardware_manifest['limits'])
+                                self._hardware_manifest['limits'], arm_position_tolerance(self.hardware_model))
             except (ValueError, TypeError) as error:
                 if self.arm_control_enabled:
                     self._set_arm_control_enabled(False, 'hardware command guard: ' + str(error))

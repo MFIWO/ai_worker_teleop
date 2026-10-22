@@ -24,6 +24,8 @@ SIDES = ('left', 'right')
 
 
 class SH5HandsHardwarePublisher(HardwareXRPublisher):
+    TRACKING_JUMP_POSITION_M = 0.30
+    ENFORCE_SHOULDER_STATIONARITY = False
     def __init__(self, start_server=True):
         self._gesture_since = None
         self._gesture_ready = False
@@ -81,12 +83,27 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
 
     async def on_hand_move(self, event, session):
         with self._xr_lock:
+            # Partial optical frames must not become commands or refresh liveness.
             try:
-                value = event.value
+                value = getattr(event, 'value', None)
                 if not isinstance(value, dict):
                     raise ValueError('expected both optical hands')
-                # Validate BOTH hands before refreshing either wrist or output.
                 parsed = {side: parse_hand_poses(value[side]) for side in SIDES}
+            except (KeyError, TypeError, ValueError, OverflowError) as error:
+                self._gesture_since = None
+                self._gesture_ready = False
+                self._gesture_latched = False
+                self._hand_previous = dict.fromkeys(SIDES)
+                now = time.monotonic()
+                if now - getattr(self, '_invalid_hand_log_at', -1e9) >= 2.:
+                    self.get_logger().warning(
+                        '[SH5 INPUT DROP] Ignoring incomplete/invalid hand frame; '
+                        'last valid targets retained, input timeout unchanged: ' + str(error))
+                    self._invalid_hand_log_at = now
+                # Preserve last successful receipts. Existing hardware hold/grace
+                # still expires if no complete, valid hand input returns.
+                return
+            try:
                 now = time.monotonic()
                 if (self._last_hand_event is not None and
                         now - self._last_hand_event > self.arm_tracking_timeout_sec):

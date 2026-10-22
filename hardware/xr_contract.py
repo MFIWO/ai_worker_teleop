@@ -140,7 +140,12 @@ def verify_description(text, model, expected_signature):
     return True
 
 
-def check_positions(side, names, positions, limits):
+def arm_position_tolerance(model):
+    # SH5 native solver can overshoot by a few tens of microradians.
+    return 1e-4 if model == 'sh5' else POSITION_EPSILON_RAD
+
+
+def check_positions(side, names, positions, limits, numerical_tolerance=POSITION_EPSILON_RAD):
     """Select seven arm joints. A legacy gripper entry is stripped, never forwarded."""
     names, positions = list(names), list(positions)
     if len(names) != len(positions) or len(names) != len(set(names)):
@@ -154,10 +159,10 @@ def check_positions(side, names, positions, limits):
     for name in ARM_NAMES[side]:
         lower, upper = limits[name]
         value = values[name]
-        if not lower - POSITION_EPSILON_RAD <= value <= upper + POSITION_EPSILON_RAD:
+        if not lower - numerical_tolerance <= value <= upper + numerical_tolerance:
             violation = max(lower - value, value - upper)
             raise ValueError(f'{name}: target {value:.17g} outside [{lower}, {upper}] '
-                             f'(violation={violation:.17g}rad, numerical_tolerance={POSITION_EPSILON_RAD:g}rad)')
+                             f'(violation={violation:.17g}rad, numerical_tolerance={numerical_tolerance:g}rad)')
         values[name] = min(upper, max(lower, value))
     return {name: values[name] for name in ARM_NAMES[side]}
 

@@ -172,7 +172,7 @@ def main():
                 'joint_velocity_limits': velocities,
                 'tracking_window_seconds': COMMAND_WINDOW_SECONDS,
                 'tracking_error_limits': {k: v * COMMAND_WINDOW_SECONDS for k, v in velocities.items()},
-                'angular_speed': ANGULAR_SPEED, 'workspace_fraction': .94,
+                'angular_speed': ANGULAR_SPEED, 'workspace_fraction': 1.0 if a.model == 'sh5' else .94,
                 'arm_limit_policy': 'physical_description',
                 'source_urdf': str(a.controller_urdf.resolve()),
                 'source_urdf_sha256': sha256(a.controller_urdf),

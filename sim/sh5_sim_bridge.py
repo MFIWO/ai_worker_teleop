@@ -24,6 +24,7 @@ class SimulationBridge(Node):
     INPUT_MAX_AGE = 4.0
     COMMAND_MAX_AGE = 4.0
     FINGER_SOFTWARE_SPEED = 30.0
+    ARM_POSITION_TOLERANCE_RAD = 1e-4
     def __init__(self):
         require_sim()
         super().__init__('sh5_sim_bridge')
@@ -95,12 +96,19 @@ class SimulationBridge(Node):
         target = dict(zip(msg.joint_names, msg.points[-1].positions))
         # Original hand optimizer occasionally overshoots a bound by <0.001 rad.
         # Accept only numerical tolerance, then clamp to the exact URDF bounds.
-        tolerance = .002 if key.endswith('_hand') else 1e-5
+        tolerance = .002 if key.endswith('_hand') else self.ARM_POSITION_TOLERANCE_RAD
         outside = {n: target[n] for n in names if not
                    self.bounds[n][0] - tolerance <= target[n] <= self.bounds[n][1] + tolerance}
         if outside:
-            self.fault = f'{key} outside SH5 joint limits: {outside}'
+            detail = {n: {'target': value, 'lower': self.bounds[n][0],
+                          'upper': self.bounds[n][1],
+                          'excess_rad': max(self.bounds[n][0] - value, value - self.bounds[n][1])}
+                      for n, value in outside.items()}
+            self.fault = f'{key} outside SH5 joint limits: {detail}; tolerance={tolerance:g}rad'
             return
+        # Accept tiny solver overshoot, but store only in-range commands.
+        target = {n: max(self.bounds[n][0], min(self.bounds[n][1], v))
+                  for n, v in target.items()}
         self.raw[key] = (target, time.monotonic())
 
     def tick(self):

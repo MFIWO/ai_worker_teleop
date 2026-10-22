@@ -69,8 +69,7 @@ class XROverheadPublisher(XRGuidedPublisher):
         actual = {s: links[s]['wrist'] for s in SIDES}
         self._diagnostics = self._session.inspect(inputs, actual)
         for side, hint in self._session.templates.items():
-            if np.linalg.norm(links[side]['shoulder'][:3, 3] - hint.shoulder) > .005:
-                raise ValueError('shoulder/base moved during startup')
+            self._check_shoulder_stationarity(links, side, hint, 'startup')
             dp = np.linalg.norm(self._goals[side][:3, 3] - actual[side][:3, 3])
             dr = Rotation.from_matrix(self._goals[side][:3, :3] @ actual[side][:3, :3].T).magnitude()
             if (dp > self._session.position_tolerance_m or
@@ -104,8 +103,7 @@ class XROverheadPublisher(XRGuidedPublisher):
                 frame = {}
                 for side in SIDES:
                     hint = hints[side]
-                    if np.linalg.norm(links[side]['shoulder'][:3, 3] - hint.shoulder) > .005:
-                        raise ValueError('shoulder/base moved during session; inspect simulator and recalibrate')
+                    self._check_shoulder_stationarity(links, side, hint, 'session')
                     if np.linalg.norm(goals[side][:3, 3] - actual[side][:3, 3]) > self.TRACKING_POSITION_LIMIT_M:
                         raise ValueError(f'{side} wrist tracking error exceeds0.25m')
                     if Rotation.from_matrix(goals[side][:3, :3] @ actual[side][:3, :3].T).magnitude() > self.TRACKING_ROTATION_LIMIT_RAD:

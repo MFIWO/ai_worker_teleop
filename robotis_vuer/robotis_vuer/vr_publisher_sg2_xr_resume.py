@@ -25,6 +25,7 @@ from robotis_vuer.xr_resume_session import FixedResumeSession
 class XRResumePublisher(XRDeltaPublisher):
     """No restart offset accumulation: immutable session + measured transient state."""
 
+    WORKSPACE_FRACTION = .94
     SETTLING_SECONDS = 0.20
     CONTROLLER_ACTIVATION_DELAY = 3.0
     ALIGN_POSITION_M = .02
@@ -176,7 +177,8 @@ class XRResumePublisher(XRDeltaPublisher):
         inputs = {s: rigid_pose(getattr(self, f'{s}_controller_matrix')) for s in SIDES}
         candidate = (None if self.REANCHOR_ON_RESUME else self._session) or FixedResumeSession(
             self.head_transform_matrix, inputs, robots, links, self.translation_scale,
-            self.ALIGN_POSITION_M, self.ALIGN_ROTATION_DEG)
+            self.ALIGN_POSITION_M, self.ALIGN_ROTATION_DEG,
+            workspace_fraction=self.WORKSPACE_FRACTION)
         self._diagnostics = candidate.inspect(inputs, robots)
         if self._session is not None and not self.REANCHOR_ON_RESUME:
             candidate.require_alignment(inputs, robots)
@@ -185,7 +187,8 @@ class XRResumePublisher(XRDeltaPublisher):
         measured_robots = {s: links[s]['wrist'] for s in SIDES}
         self._diagnostics = candidate.inspect(inputs, measured_robots)
         candidate.require_alignment(inputs, measured_robots)
-        hints = candidate.fresh_hints(links)
+        hints = candidate.fresh_hints(
+            links, enforce_shoulder_stationarity=self.ENFORCE_SHOULDER_STATIONARITY)
         # Session commit is atomic, after both arms and all preconditions pass.
         self._session = candidate
         self._mapper = candidate.mapper
@@ -258,8 +261,7 @@ class XRResumePublisher(XRDeltaPublisher):
                 actual = {s: links[s]['wrist'] for s in SIDES}
                 self._diagnostics = self._session.inspect(inputs, actual)
                 for side, hint in self._session.templates.items():
-                    if np.linalg.norm(links[side]['shoulder'][:3, 3] - hint.shoulder) > 0.005:
-                        raise ValueError('shoulder/base moved during session; inspect simulator and recalibrate')
+                    self._check_shoulder_stationarity(links, side, hint, 'session')
                 if self._phase in ('SETTLING', 'WARMUP'):
                     # [FIX] Do not re-zero head/input at the end of settling.
                     # Nor queue human motion while Cyclo waits 3s + ramps 8s.
