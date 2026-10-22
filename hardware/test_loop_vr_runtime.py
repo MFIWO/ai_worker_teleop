@@ -28,7 +28,7 @@ class LoopRuntimeTests(unittest.TestCase):
             def stats(self):return SimpleNamespace(connected=True)
             def send_robot(self,stamp,sequence,payload):frames.append((stamp,sequence,payload))
             def close(self):pass
-        def connect(addr,schema):
+        def connect(addr,schema,**kwargs):
             schemas.append(schema)
             return Sink()
         epoch=1792660000000000
