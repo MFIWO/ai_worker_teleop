@@ -32,7 +32,7 @@ already exited, including hand initialization executors. Already-running
 external services reused by this command are not owned by it. New PID files and logs are under
 `/workspace/ai_worker_xr_sessions/<id>/`. The wrapper never starts a physical
 leader. `--loop off` is the default and starts only the optical hand/arm path.
-`--loop-no-camera` on the robot command selects joint/status streaming only.
+`--loop-no-camera` on the robot command selects joint/tactile/status streaming only.
 `--dry-run` prints the host command without SSH, ROS, or hardware startup.
 Allow the robot terminal to finish its `[STOP]` messages before closing it.
 
@@ -41,10 +41,20 @@ group but its current shell lacks that group. It does not change socket modes.
 
 ## Recording behavior
 
-Select source **robotis-vr-sh5** / robot type **ffw_sh5_vr** in Loop. Select the
+In Loop Preview, select **AI Worker VR / HX5-D20** (stable source key
+**robotis-vr-sh5**), robot type **ffw_sh5_vr**, action space **joint_position**,
+and finger type **HX5-D20**. This one robot source carries the arm/hand angles,
+hand commands, raw fingertip pressures and teleop metadata together. The
+finger-type selector is advertised through the same SDK `finger_type` axis
+used by xr_tele for RH5DG2. Reopen/reselect a saved Preview configuration after
+updating to pick up the new option and channels. Select the
 camera sources exposed by the existing robot camera implementation. Start,
 finish, save and discard the episode in Loop as usual. The wrapper never
 invokes Loop's recording start/stop/save/delete API.
+
+The SDK's `on_select` callback confirms these recording metadata values when
+Preview opens the source. Unsupported robot/hand/action identities are rejected;
+this callback does not initialize, move or reconfigure the physical robot.
 
 **HOLD and C keep the same Loop recording running.** Joint state, latest
 command values, camera frames and status continue. A held or stale command is
@@ -59,6 +69,61 @@ move the base/head/lift; continuous observations preserve those events.
 | head | measured 2 joints | gated keyboard trajectory |
 | lift | measured 1 joint | gated keyboard trajectory |
 | mobile | measured odometry vx, vy, wz | gated cmd_vel vx, vy, wz |
+
+### HX5-D20 fingertip tactile
+
+The read-only adapter subscribes to `/left_hand/finger_pressures` and
+`/right_hand/finger_pressures` (`robotis_interfaces/msg/HandPressures`). It
+uses the existing follower pressure broadcasters and never opens a second
+serial connection or starts a tactile grasp controller. The official current
+SH5 follower launch includes `pressure_l_broadcaster` and
+`pressure_r_broadcaster`; older installed workspaces may not have these.
+
+Each hand's existing observation/action joint-position vectors still contain
+20 joints. The same source adds these channels beneath
+`ffw_sh5_vr.observation.left_hand` and `.right_hand`:
+
+| Suffix | Entries |
+|---|---|
+| tactile_pressure | 45 unsigned raw readings (0..255); 5 sensors x 3 x 3 |
+| tactile_status | received, valid_message, fresh, observed_receipt_hz |
+| tactile_timing | receipt age in seconds (-1=missing), ROS header stamp in seconds (-1=missing), local receipt sequence |
+
+Pressure ordering is `finger_l_sensor1..5` / `finger_r_sensor1..5`, each with
+`Present Pressure 1..9` in row-major order (top to bottom, left to right).
+The adapter resolves both sensor names and pressure names; array arrival order
+does not change this layout. Sensor numbers are kept verbatim rather than
+guessing their anatomical finger names. Missing/duplicate sensors, invalid
+interface names and values outside 0..255 invalidate that hand's sample.
+Malformed or older-than-0.5-second pressures are `None`, not fabricated zeros.
+Status/timing continue even when pressure is missing; `valid_message` describes
+the last message, while `fresh` additionally checks receipt age. Receipt Hz
+measures callback arrival, not the hardware sampling clock or sensor health.
+
+The combined source sends the latest raw readings on its existing 30 Hz
+recording clock, alongside joint values, including during C/HOLD. It does not
+preserve every upstream frame if the pressure publisher runs faster; header
+stamps, receipt sequence and arrival rate make reuse/downsampling visible.
+Raw pressure is not calibrated Newton force. No baseline subtraction or
+RH5DG2 force/proximity/palm conversion is applied. These are robot channels in
+the existing Preview/recording source; this change does not add a custom hand
+heatmap widget to the Loop application.
+
+After deployment, with the follower already running, these commands only read
+the active controllers/topics inside `ai_worker` (source ROS/workspace first,
+with `ROS_DOMAIN_ID=30 RMW_IMPLEMENTATION=rmw_zenoh_cpp`):
+
+```bash
+ros2 control list_controllers
+ros2 topic list -t | grep -E 'finger_pressures|HandPressures'
+ros2 topic echo /left_hand/finger_pressures --once
+ros2 topic echo /right_hand/finger_pressures --once
+```
+
+Successful reception prints `[HX5-D20] left/right: valid 5x3x3 raw tactile
+received`. Missing message definitions or stale topics print diagnostics and
+leave pressure absent while other VR/Loop channels continue. Do not start a
+second hand bringup to obtain tactile while the SH5 follower owns the hardware.
 
 Keys use `ffw_sh5_vr.observation.<group>.joint_position` and
 `ffw_sh5_vr.action.<group>.joint_position`; mobile ends with `.velocity`.
