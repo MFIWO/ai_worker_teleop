@@ -1,0 +1,164 @@
+"""Read-only VR adapter around the robot's installed Loop camera/SDK implementation."""
+import argparse
+import json
+from pathlib import Path
+import signal
+import tempfile
+import time
+
+from hardware.loop_vr_contract import RecordingStatus, vr_parameters
+from hardware.loop_clock import PCRecordingClock,ClockedRobotStreamer
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--loop-addr', required=True)
+    parser.add_argument('--robot-ip', required=True)
+    parser.add_argument('--fps', type=float, default=30.)
+    parser.add_argument('--no-camera', action='store_true')
+    parser.add_argument('--describe', action='store_true')
+    args = parser.parse_args()
+    import yaml
+    from ament_index_python.packages import get_package_share_directory
+    config = Path(get_package_share_directory('ffw_loop_streamer'))/'config/ffw_sg2_rev1.yaml'
+    params = vr_parameters(yaml.safe_load(config.read_text()), loop_addr=args.loop_addr,
+                           fps=args.fps, robot_ip=args.robot_ip)
+    params['/**']['ros__parameters']['enable_camera'] = not args.no_camera
+    if args.describe:
+        print(yaml.safe_dump(params, sort_keys=False))
+        return
+    import rclpy
+    from rclpy.signals import SignalHandlerOptions
+    from rclpy.node import Node
+    from rclpy.qos import QoSProfile,ReliabilityPolicy,HistoryPolicy
+    from std_msgs.msg import String
+    from ffw_loop_streamer.loop_streamer_node import LoopStreamerNode
+    from ffw_loop_streamer.loop_streamer import RobotStepMapper, ChannelInfo,parse_camera_rotation
+
+    class VRMapper(RobotStepMapper):
+        def channel_infos(self):
+            return super().channel_infos() + [ChannelInfo(
+                key=f'{self.robot_type}.teleop.{name}', label=label, unit=unit, group='teleop')
+                for name, label, unit in (
+                    ('flags', 'active,paused,manual_active,fault,status_fresh', 'bool'),
+                    ('phase', 'phase code (see VR_LOOP.md)', 'enum'),
+                    ('action_fresh', 'left_arm,right_arm,left_hand,right_hand,head,lift,mobile', 'bool'),
+                    ('action_valid', 'left_arm,right_arm,left_hand,right_hand,head,lift,mobile', 'bool'),
+                    ('ages', 'joint_receipt,gate_receipt,intent_receipt (-1=missing)', 's'),
+                    ('clock', 'pc_anchor_age,robot_minus_pc_wallclock', 's'))]
+
+    class VRNode(LoopStreamerNode):
+        def __init__(self):
+            self.recording_status = RecordingStatus()
+            self.recording_clock = PCRecordingClock()
+            # Reuse installed subscriber/camera methods, while selecting a public
+            # SDK sender that supports an explicit PC-clock timestamp. No global
+            # monkeypatches or installed Loop package changes.
+            Node.__init__(self,'loop_vr_streamer')
+            defaults=dict(robot_type='',loop_addr=args.loop_addr,fps=30.,source_key='robotis-vr-sh5',
+                enable_camera=True,rtsp_advertise_host='',rtsp_base_port=8554,jpeg_quality=75,
+                jpeg_recompress_cameras='',camera_rotation='',rotated_jpeg_quality=90,
+                camera_probe_timeout_s=120.,connect_timeout_s=5.)
+            for name,value in defaults.items():self.declare_parameter(name,value)
+            value=lambda name:self.get_parameter(name).value
+            self.robot_type,self.loop_addr,self.fps=value('robot_type'),value('loop_addr'),float(value('fps'))
+            self.enable_camera=bool(value('enable_camera'))
+            self.jpeg_quality=int(value('jpeg_quality'))
+            self.jpeg_recompress_cameras=tuple(n.strip() for n in str(value('jpeg_recompress_cameras')).split(',') if n.strip())
+            self.camera_rotation=parse_camera_rotation(str(value('camera_rotation')))
+            self.rotated_jpeg_quality=int(value('rotated_jpeg_quality'))
+            self._rotation_failed_once={}
+            self.camera_probe_timeout_s=float(value('camera_probe_timeout_s'))
+            self.connect_timeout_s=float(value('connect_timeout_s'))
+            if not 1<=self.jpeg_quality<=100 or not 1<=self.rotated_jpeg_quality<=100:
+                raise ValueError('JPEG quality must be 1..100')
+            self._load_robot_config()
+            self._camera_msgs={}
+            self._follower_joint_msgs={}
+            self._leader_joint_msgs={}
+            self._follower_mobile_msg=self._leader_mobile_msg=None
+            self._warned_missing_joints=False
+            self._qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT,history=HistoryPolicy.KEEP_LAST)
+            self._init_subscribers()
+            self.robot_streamer=ClockedRobotStreamer(self.loop_addr,self.mapper,self.recording_clock)
+            self.robot_streamer.connect()
+            self.camera_streamer=None
+            self._probe_started_at=time.monotonic()
+            self._probe_timer=(self.create_timer(self.PROBE_PERIOD_S,self._probe_cameras)
+                               if self.enable_camera and self.camera_topics else None)
+            self._stream_timer=self.create_timer(1./self.fps,self._stream_tick)
+            self._tick_count=0
+            self.create_subscription(String, '/xr_hardware/gate_status', lambda msg:self.receive_status('gate',msg), 10)
+            self.create_subscription(String, '/xr_hardware/intent', lambda msg:self.receive_status('intent',msg), 10)
+            self.get_logger().info('VR continuous recording: HOLD never stops data/camera transmission. No recording API calls.')
+
+        def _load_robot_config(self):
+            super()._load_robot_config()
+            self.mapper = VRMapper(self.robot_type, self.mapper.groups)
+
+        def receive_status(self, kind, msg):
+            try:
+                data=json.loads(msg.data)
+                now=time.monotonic()
+                accepted=self.recording_status.status(kind,data,now)
+                if accepted and kind=='intent' and data.get('recording_epoch_us'):
+                    self.recording_clock.receive(data['recording_epoch_us'],now)
+            except (ValueError, KeyError, TypeError, AttributeError):
+                setattr(self.recording_status, kind+'_rx', None)
+
+        def _follower_joint_callback(self, name, msg):
+            super()._follower_joint_callback(name,msg)
+            self.recording_status.observation_rx=time.monotonic()
+
+        def _follower_mobile_callback(self,msg):
+            super()._follower_mobile_callback(msg)
+            self.recording_status.mobile_rx=time.monotonic()
+
+        def _leader_joint_callback(self,name,msg):
+            super()._leader_joint_callback(name,msg)
+            if msg.points:
+                self.recording_status.action_rx[name.removeprefix('leader_')]=time.monotonic()
+
+        def _leader_mobile_callback(self,msg):
+            super()._leader_mobile_callback(msg)
+            self.recording_status.action_rx['mobile']=time.monotonic()
+
+        def _stream_tick(self):
+            now=time.monotonic()
+            observed=self._collect_follower_positions()
+            if self.recording_status.observation_rx is None or now-self.recording_status.observation_rx>.5:
+                observed=None
+            mobile=(self._odometry_vector(self._follower_mobile_msg) if self.recording_status.mobile_rx is not None
+                    and now-self.recording_status.mobile_rx<=.5 else None)
+            payload=self.mapper.build_payload(follower_positions=observed,
+                leader_positions=self._collect_leader_positions(),mobile_state=mobile,
+                mobile_command=self._twist_vector(self._leader_mobile_msg))
+            payload.update({f'{self.robot_type}.teleop.{k}':v for k,v in self.recording_status.values(now).items()})
+            anchor_age=(-1. if self.recording_clock.last_receipt is None else now-self.recording_clock.last_receipt)
+            skew=(-1. if self.recording_clock.anchor is None else time.time()-self.recording_clock.anchor-now)
+            payload[f'{self.robot_type}.teleop.clock']=[anchor_age,skew]
+            self.robot_streamer.send(payload)
+            self._tick_count+=1
+
+    def interrupt(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM,interrupt)
+    with tempfile.TemporaryDirectory(prefix='loop_vr_') as directory:
+        generated=Path(directory)/'parameters.yaml'
+        generated.write_text(yaml.safe_dump(params,sort_keys=False))
+        rclpy.init(args=['--ros-args','--params-file',str(generated),'-r','__node:=loop_vr_streamer'],
+                   signal_handler_options=SignalHandlerOptions.NO)
+        node=None
+        try:
+            node=VRNode()
+            rclpy.spin(node)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if node is not None:
+                node.close()
+                node.destroy_node()
+            if rclpy.ok():rclpy.shutdown()
+
+
+if __name__=='__main__':main()
