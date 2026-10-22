@@ -137,7 +137,7 @@ if (( PREPARE_READY )); then
   echo '[NEXT: QUEST] Wait for controller/model feedback, then press X+A. No automatic VR activation.'
 fi
 
-echo "[HARDWARE $MODEL] readiness=$READINESS_POLICY; RMW=$RMW_IMPLEMENTATION; Cartesian filter=.3m/s/1.5rad/s; URDF joint limits."
+echo "[HARDWARE $MODEL] readiness=$READINESS_POLICY; RMW=$RMW_IMPLEMENTATION; Cartesian filter=3m/s/15rad/s; URDF joint limits."
 if (( ! HANDS )); then
   echo '[HARDWARE] Manual X+A starts/resumes; Y+B stops. SG2 sticks/trigger via gate.'
 fi

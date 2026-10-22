@@ -43,6 +43,8 @@ def pose_matrix(pose):
 
 class XRDeltaPublisher(VRTrajectoryPublisher):
     RECEIPT_TIME_ONLY = False
+    FEEDBACK_MAX_AGE = 0.5
+    ARM_TRACKING_TIMEOUT = 0.5
     # [ADDED 2026-10-14] Explicit opt-in subclass hooks. Legacy defaults unchanged.
     DEFAULT_GOAL_SPEED = 0.20
     DEFAULT_ANGULAR_SPEED = 1.0
@@ -72,6 +74,7 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
         self._last_reason = None
         self.published_pairs = 0
         super().__init__()  # Real rclpy/Vuer; server startup is deferred below.
+        self.arm_tracking_timeout_sec = self.ARM_TRACKING_TIMEOUT
 
         # [CHANGED] Arms-only mode must not accidentally emit legacy raw poses,
         # trigger or joystick trajectories even if a controller button is used.
@@ -145,7 +148,7 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
                     raise ValueError('controller EE pose must use base_link')
                 stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
                 age = self.get_clock().now().nanoseconds * 1e-9 - stamp
-                if not self.RECEIPT_TIME_ONLY and not -0.1 <= age <= 0.5:
+                if not self.RECEIPT_TIME_ONLY and not -0.1 <= age <= self.FEEDBACK_MAX_AGE:
                     raise ValueError('stale controller EE feedback timestamp')
                 if self.RECEIPT_TIME_ONLY and stamp <= self._pose_sources.get(side, -float('inf')):
                     return
@@ -164,7 +167,7 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
     def _arm_tracking_is_fresh(self, now=None):
         now = time.monotonic() if now is None else now
         return (super()._arm_tracking_is_fresh(now) and self._joint_rx is not None
-                and 0 <= now - self._joint_rx <= 0.5)
+                and 0 <= now - self._joint_rx <= self.FEEDBACK_MAX_AGE)
 
     def _tf_pose(self, link):
         tf = self.tf_buffer.lookup_transform('base_link', link, Time())
@@ -174,9 +177,9 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
             # Receipt is recorded by the actual /tf callback, never a lookup
             # of a cached transform (reading cache must not refresh liveness).
             _, receipt = getattr(self, '_tf_receipts', {}).get(link, (-float('inf'), -float('inf')))
-            if time.monotonic() - receipt > .5:
+            if time.monotonic() - receipt > self.FEEDBACK_MAX_AGE:
                 raise ValueError(f'TF updates stopped for {link}')
-        elif not -0.1 <= age <= 0.5:
+        elif not -0.1 <= age <= self.FEEDBACK_MAX_AGE:
             raise ValueError(f'stale TF for {link}: {age:.3f}s')
         p, q = tf.transform.translation, tf.transform.rotation
         msg = PoseStamped()
@@ -211,11 +214,11 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
         now_ros = self.get_clock().now().nanoseconds * 1e-9
         for side in SIDES:
             controller_pose, receipt, source_stamp = self._robot_poses.get(side, (None, -1e9, -1e9))
-            if (controller_pose is None or now - receipt > 0.5
+            if (controller_pose is None or now - receipt > self.FEEDBACK_MAX_AGE
                     or receipt < self._stopped_at + 0.15
                     or self._stopped_ros is None
                     or source_stamp < self._stopped_ros + 0.10
-                    or not -0.1 <= now_ros - source_stamp <= 0.5):
+                    or not -0.1 <= now_ros - source_stamp <= self.FEEDBACK_MAX_AGE):
                 raise ValueError(f'missing inactive Cyclo {side} gripper pose; is the VR controller running?')
             actual = links[side]['wrist']
             dp = np.linalg.norm(controller_pose[:3, 3] - actual[:3, 3])

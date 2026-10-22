@@ -52,27 +52,16 @@ def make_files(model, controller_text, description_text, config):
             real_bound = physical.find(f"joint[@name='{name}']/limit")
             if real_bound is None:
                 raise ValueError(f'{name}: physical URDF limit missing')
-            if model == 'sg2':
-                # [CHANGED 2026-10-14] The physical expanded URDF is the sole
-                # SG2 arm position/velocity authority. Do not retain the older
-                # Cyclo joint4=-0.7 commissioning bound.
-                lower = float(real_bound.get('lower'))
-                upper = float(real_bound.get('upper'))
-                velocity = float(real_bound.get('velocity'))
-                if not lower < upper or velocity <= 0:
-                    raise ValueError(f'{name}: invalid physical URDF bounds')
-                bound.set('lower', str(lower))
-                bound.set('upper', str(upper))
-                bound.set('velocity', str(velocity))
-                limits[name] = [lower, upper]
-            else:
-                lower, upper = float(bound.get('lower')), float(bound.get('upper'))
-                if (lower < float(real_bound.get('lower'))-1e-9
-                        or upper > float(real_bound.get('upper'))+1e-9):
-                    raise ValueError(f'{name}: controller bounds are not contained in the physical description')
-                if not lower < upper:
-                    raise ValueError(f'invalid bounds for {name}')
-                limits[name] = [lower, upper]
+            # Both tool variants use the measured physical description's arm
+            # position/velocity limits, not the legacy Cyclo trial restriction.
+            lower, upper = float(real_bound.get('lower')), float(real_bound.get('upper'))
+            velocity = float(real_bound.get('velocity'))
+            if not lower < upper or velocity <= 0:
+                raise ValueError(f'{name}: invalid physical URDF bounds')
+            bound.set('lower', str(lower))
+            bound.set('upper', str(upper))
+            bound.set('velocity', str(velocity))
+            limits[name] = [lower, upper]
     output = deepcopy(config)
     p = output['vr_controller']['ros__parameters']
     if p.get('lift_vel_bound', 0.0) != 0.0:
@@ -184,6 +173,7 @@ def main():
                 'tracking_window_seconds': COMMAND_WINDOW_SECONDS,
                 'tracking_error_limits': {k: v * COMMAND_WINDOW_SECONDS for k, v in velocities.items()},
                 'angular_speed': ANGULAR_SPEED, 'workspace_fraction': .94,
+                'arm_limit_policy': 'physical_description',
                 'source_urdf': str(a.controller_urdf.resolve()),
                 'source_urdf_sha256': sha256(a.controller_urdf),
                 'description_sha256': sha256(a.description), 'arm_dxl_ids': motor_ids,
@@ -208,7 +198,7 @@ def main():
         manifest[k+'_sha256'] = sha256(p)
     (a.output/'profile.json').write_text(json.dumps(manifest, indent=2))
     print('[PROFILE]', a.output/'profile.json')
-    print('[PRESERVED] conservative position bounds, collision geometry, CBF and all original files')
+    print('[PRESERVED] physical URDF position/velocity bounds, collision geometry, CBF and original source files')
     print('[READINESS POLICY]', a.readiness_policy)
     print(f'[HARDWARE] Arm velocity uses verified URDF (max {max(velocities.values()):g}rad/s); '
           f'Cartesian speed caps are non-binding ({GOAL_SPEED:g}m/s, {ANGULAR_SPEED:g}rad/s); '

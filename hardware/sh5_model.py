@@ -15,7 +15,6 @@ import xml.etree.ElementTree as ET
 
 ARM_NAMES = tuple(f'arm_{side}_joint{i}' for side in ('l', 'r') for i in range(1, 8))
 RETAINED_JOINTS = ARM_NAMES + ('lift_joint',)
-MAX_ARM_SPEED = 0.35
 _IDENTITY = ((1., 0., 0.), (0., 1., 0.), (0., 0., 1.))
 
 
@@ -307,14 +306,9 @@ def build_sh5_model(description_text: str, control_text: str, srdf_text: str,
     measured = {name: _number(snapshot[name], 'snapshot ' + name) for name in sorted(movable)}
     arm_limits, velocities = {}, {}
     for name in ARM_NAMES:
-        actual, reference = _limits(joints[name]), _limits(control_joints[name])
-        if name.endswith('joint4') and reference[1] > -.7 + 1e-12:
-            raise ValueError('refuse simulation-expanded joint4 limit in Cyclo control model')
-        lower, upper = max(actual[0], reference[0]), min(actual[1], reference[1])
-        if lower >= upper:
-            raise ValueError(name + ': empty conservative position-limit intersection')
-        velocity = min(actual[2], reference[2], MAX_ARM_SPEED)
-        # [CHANGED] Intersect, never widen either source's arm limits.
+        # Use the physical SH5 description, as the SG2 hardware path does.
+        # The installed Cyclo model supplies kinematics, not legacy trial limits.
+        lower, upper, velocity = _limits(joints[name])
         bound = joints[name].find('limit')
         for key, value in (('lower', lower), ('upper', upper), ('velocity', velocity)):
             bound.set(key, format(value, '.17g'))
@@ -333,6 +327,7 @@ def build_sh5_model(description_text: str, control_text: str, srdf_text: str,
         'retained_movable_joints': list(RETAINED_JOINTS), 'movable_dof': 15,
         'frozen_joint_count': len(frozen), 'frozen_posture_must_be_monitored': True,
         'arm_limits': arm_limits, 'arm_velocity_limits': velocities,
+        'arm_limit_policy': 'physical_description',
         'required_lift_velocity_bound': 0.0,
         'tool_collision_coverage': 'SH5 description geometry at measured frozen hand posture',
         'mesh_resources_verified': False, 'physical_motion_verified': False,

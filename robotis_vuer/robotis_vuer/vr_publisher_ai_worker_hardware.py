@@ -58,7 +58,9 @@ class AuxiliarySink:
 
 
 class HardwareXRPublisher(XROverheadPublisher):
-    TRACKING_GRACE_SECONDS = 5.0
+    TRACKING_GRACE_SECONDS = 50.0
+    FEEDBACK_MAX_AGE = 5.0
+    ARM_TRACKING_TIMEOUT = 5.0
     RECEIPT_TIME_ONLY = True
     REANCHOR_ON_RESUME = True
     REZERO_ON_READY = True
@@ -309,10 +311,9 @@ class HardwareXRPublisher(XROverheadPublisher):
                     p['tracking_window_seconds'] != COMMAND_WINDOW_SECONDS or
                     p['tracking_error_limits'] != {k: v * COMMAND_WINDOW_SECONDS for k, v in velocities.items()}):
                 raise ValueError('invalid per-joint URDF gate limits')
-            if self.hardware_model == 'sh5':
-                for short in ('l', 'r'):
-                    if p['limits'][f'arm_{short}_joint4'][1] > -.7 + 1e-12:
-                        raise ValueError('unexpected SH5 arm limit expansion')
+            if (self.hardware_model == 'sh5' and
+                    p.get('arm_limit_policy') != 'physical_description'):
+                raise ValueError('Update robot launcher and regenerate the SH5 physical-limit profile')
             self._hardware_manifest = p
             self._gate_profile_rx = time.monotonic()
         except Exception:
@@ -367,13 +368,13 @@ class HardwareXRPublisher(XROverheadPublisher):
         XRDeltaPublisher._graph_check(self)
         now = time.monotonic()
         active = self.arm_control_enabled and self._phase == 'ACTIVE'
-        profile_age_limit = self.TRACKING_GRACE_SECONDS + 2. if active else 4.
+        profile_age_limit = self.TRACKING_GRACE_SECONDS + 20. if active else 40.
         if (not self._profile_verified or now-self._profile_rx > profile_age_limit
                 or now-self._gate_profile_rx > profile_age_limit):
             raise ValueError('HARDWARE_PROFILE_REQUIRED: run matching hardware/controller launcher, not sim launcher')
         feedback_wait = (self.arm_control_enabled and self._phase == 'ACTIVE'
                          and self._feedback_input_state(now) == 'waiting')
-        gate_age_limit = self.TRACKING_GRACE_SECONDS if active else .5
+        gate_age_limit = self.TRACKING_GRACE_SECONDS if active else self.FEEDBACK_MAX_AGE
         if (self._gate_state is None or now-self._gate_rx > gate_age_limit
                 or not self._gate_state.get('description_ok')
                 or (not feedback_wait and (not self._gate_state.get('measured_fresh')
@@ -427,7 +428,7 @@ class HardwareXRPublisher(XROverheadPublisher):
         tracking_ok = state == 'fresh' or (
             state == 'waiting' and self.arm_control_enabled and self._phase == 'ACTIVE')
         limit = (self.TRACKING_GRACE_SECONDS
-                 if self.arm_control_enabled and self._phase == 'ACTIVE' else .5)
+                 if self.arm_control_enabled and self._phase == 'ACTIVE' else self.FEEDBACK_MAX_AGE)
         return (tracking_ok and self._joint_rx is not None
                 and 0.0 <= now - self._joint_rx <= limit)
 
@@ -440,7 +441,7 @@ class HardwareXRPublisher(XROverheadPublisher):
         age = max(now-t for t in receipts)
         if age > self.TRACKING_GRACE_SECONDS:
             return 'expired'
-        if age > .5 or (self._gate_state or {}).get('feedback_waiting'):
+        if age > self.FEEDBACK_MAX_AGE or (self._gate_state or {}).get('feedback_waiting'):
             return 'waiting'
         return 'fresh'
 

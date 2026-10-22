@@ -508,9 +508,10 @@ unmodified installed ROBOTIS `retargeting_teleop`. It does not use the earlier
 simulation publisher or the legacy `controller_pc.sh` arm path. The robot build
 adds measured finger positions to collision FK and fixes finger QP velocities at
 zero: only the native hand retargeter commands fingers. Other passive joints
-remain monitored at the captured posture. Existing SH5 arm limits still apply
-(arm speed up to 0.35 rad/s and joint4 upper bound -0.7 rad); these differ from
-SG2's physical-URDF limits. Arm mapping, capture, resume and Cartesian filtering
+remain monitored at the captured posture. SG2 and SH5 now both use the captured physical URDF arm position and velocity
+limits. The former SH5-only 0.35 rad/s cap and legacy Cyclo joint4 limit are removed.
+Refresh both PC and robot source and restart run_controller.sh to generate a new
+profile; old fixed-limit SH5 profiles are not accepted. Arm mapping, capture, resume and Cartesian filtering
 remain inherited from the existing hardware publisher.
 
 Extra hand-span heuristics, duplicate short-gap disarm, and hand-node-count
@@ -591,8 +592,8 @@ than modifying the installed source blindly. Use `--rebuild` after source update
 
 Start the actual SH5 follower using its established bringup and ready pose first.
 This command uses `--arm`, not SG2's `--start`: it does not move to a ready pose.
-Both elbows must already be within the existing SH5 model limits (the usual
-ready angle is approximately -1.57 rad). Stop earlier teleop/hand-test publishers.
+Both elbows must already be within the actual physical SH5 URDF limits (the
+usual ready angle is approximately -1.57 rad). Stop earlier teleop/hand-test publishers.
 
 PC terminal:
 
@@ -620,3 +621,11 @@ the same gesture stops input. PC and robot use the existing domain 30/Zenoh path
 IP values are command arguments, not baked into source. If the PC IP changes,
 its Vuer certificate must include the new IP; use the existing certificate setup
 before launching. The `--server-ip` check reports a mismatch before starting Vuer.
+
+## 2026-10-22: SH5 software limits and deployment
+
+The latest settings and complete push/clone/offline-rsync/build/start commands are in [SH5_DEPLOY.md](SH5_DEPLOY.md).
+Cartesian defaults are now 3 m/s and 15 rad/s; input freshness is 5 s and the hardware hold-to-fault grace is 50 s.
+Physical URDF position/velocity limits and collision checks remain. Shared hardware defaults also apply to SG2 hardware mode.
+SH5 simulation entrypoints are now included in this checkout, with 2 m/s and 10 rad/s Cartesian defaults.
+Runtime testing was not performed for these changes.

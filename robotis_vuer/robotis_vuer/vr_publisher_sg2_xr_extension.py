@@ -137,7 +137,7 @@ class XRExtensionPublisher(XRResumePublisher):
                 try:
                     inputs, actual = self._held_startup_snapshot()
                     now = time.monotonic()
-                    if any(now - self._command_rx.get(s, -1e9) > 0.5 for s in SIDES):
+                    if any(now - self._command_rx.get(s, -1e9) > self.FEEDBACK_MAX_AGE for s in SIDES):
                         raise ValueError('Cyclo command feedback stale at startup confirmation')
                     if self.REZERO_ON_READY:
                         self._require_still_robot(now)
@@ -184,13 +184,13 @@ class XRExtensionPublisher(XRResumePublisher):
                     self._startup_reconfirm = True
                 if self._phase in ('WARMUP', 'WAIT_START'):
                     if self._first_command_rx:
-                        if any(now - self._command_rx.get(s, -1e9) > 0.5
+                        if any(now - self._command_rx.get(s, -1e9) > self.FEEDBACK_MAX_AGE
                                for s in self._first_command_rx):
                             raise ValueError('Cyclo arm command feedback stale during warmup')
                     if len(self._first_command_rx) < 2 and now - self._enable_at > 10.0:
                         raise ValueError('Cyclo produced no complete arm commands after start')
                 if self._phase == 'WAIT_START':
-                    if any(now - self._command_rx.get(s, -1e9) > 0.5 for s in SIDES):
+                    if any(now - self._command_rx.get(s, -1e9) > self.FEEDBACK_MAX_AGE for s in SIDES):
                         raise ValueError('Cyclo arm command feedback stale while awaiting X+A')
                     if self._wait_start_at is not None and now - self._wait_start_at > 60.0:
                         raise ValueError('startup confirmation timed out; stopping with original calibration retained')

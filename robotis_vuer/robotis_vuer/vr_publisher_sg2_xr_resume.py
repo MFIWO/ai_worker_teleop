@@ -82,7 +82,7 @@ class XRResumePublisher(XRDeltaPublisher):
         # [FIX] Receipt freshness alone does not establish fresh measured state.
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         now_ros = self.get_clock().now().nanoseconds * 1e-9
-        if not self.RECEIPT_TIME_ONLY and not -0.1 <= now_ros - stamp <= 0.5:
+        if not self.RECEIPT_TIME_ONLY and not -0.1 <= now_ros - stamp <= self.FEEDBACK_MAX_AGE:
             self._joint_rx = None
             self._joint_history.clear()
             return
@@ -126,9 +126,9 @@ class XRResumePublisher(XRDeltaPublisher):
     def _require_still_robot(self, now):
         now_ros = self.get_clock().now().nanoseconds*1e-9
         samples = [item for item in self._joint_history
-                   if now - item[0] <= 0.5 and item[0] >= self._stopped_at + 0.05
+                   if now - item[0] <= self.FEEDBACK_MAX_AGE and item[0] >= self._stopped_at + 0.05
                    and (self.RECEIPT_TIME_ONLY or (item[1] >= self._stopped_ros + 0.10
-                   and -0.1 <= now_ros-item[1] <= 0.5))]
+                   and -0.1 <= now_ros-item[1] <= self.FEEDBACK_MAX_AGE))]
         if (len(samples) < 3 or samples[-1][0] - samples[0][0] < self.STILL_WINDOW_SECONDS
                 or (not self.RECEIPT_TIME_ONLY and samples[-1][1] - samples[0][1] < self.STILL_WINDOW_SECONDS)
                 or any(b[1] <= a[1] for a, b in zip(samples, samples[1:]))):
@@ -154,9 +154,9 @@ class XRResumePublisher(XRDeltaPublisher):
         now_ros = self.get_clock().now().nanoseconds * 1e-9
         for side in SIDES:
             pose, receipt, source = self._robot_poses.get(side, (None, -1e9, -1e9))
-            if (pose is None or now - receipt > 0.5 or receipt < self._stopped_at + 0.15
+            if (pose is None or now - receipt > self.FEEDBACK_MAX_AGE or receipt < self._stopped_at + 0.15
                     or (not self.RECEIPT_TIME_ONLY and
-                        (source < self._stopped_ros + 0.10 or not -0.1 <= now_ros - source <= 0.5))):
+                        (source < self._stopped_ros + 0.10 or not -0.1 <= now_ros - source <= self.FEEDBACK_MAX_AGE))):
                 raise ValueError(f'missing inactive Cyclo {side} gripper pose')
             actual = links[side]['wrist']
             dp = np.linalg.norm(pose[:3, 3] - actual[:3, 3])
@@ -283,7 +283,7 @@ class XRResumePublisher(XRDeltaPublisher):
                         self._publish_reactivate(True, 'manual aligned resume; stationary targets during warmup')
                     elif self._phase == 'WARMUP':
                         if len(self._first_command_rx) == 2:
-                            if any(now - self._command_rx.get(s, -1e9) > 0.5 for s in SIDES):
+                            if any(now - self._command_rx.get(s, -1e9) > self.FEEDBACK_MAX_AGE for s in SIDES):
                                 raise ValueError('Cyclo arm command feedback stale during warmup')
                             if now - max(self._first_command_rx.values()) >= self.WARMUP_HOLD_SECONDS:
                                 self._session.require_alignment(inputs, actual)
@@ -296,7 +296,7 @@ class XRResumePublisher(XRDeltaPublisher):
                             raise ValueError('Cyclo produced no complete arm commands after start')
                     self._last_pub = now
                     return
-                if any(now - self._command_rx.get(s, -1e9) > 0.5 for s in SIDES):
+                if any(now - self._command_rx.get(s, -1e9) > self.FEEDBACK_MAX_AGE for s in SIDES):
                     raise ValueError('Cyclo command feedback stopped')
                 dt = 1 / 30 if self._last_pub is None else now - self._last_pub
                 goals, elbows, hints = deepcopy(self._goals), deepcopy(self._elbows), deepcopy(self._hints)
@@ -330,7 +330,7 @@ class XRResumePublisher(XRDeltaPublisher):
         samples = [('body', self.last_body_pose_sec, self.arm_tracking_timeout_sec),
                    *[(side + '_controller', self.last_controller_pose_sec.get(side),
                       self.arm_tracking_timeout_sec) for side in SIDES],
-                   ('joint_feedback', self._joint_rx, 0.5)]
+                   ('joint_feedback', self._joint_rx, self.FEEDBACK_MAX_AGE)]
         details = []
         for name, stamp, limit in samples:
             age = None if stamp is None else now - stamp

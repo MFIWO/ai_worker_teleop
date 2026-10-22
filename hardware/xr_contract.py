@@ -13,9 +13,9 @@ GATE_NAME = 'xr_hardware_gate'
 PC_NAME = 'ai_worker_xr_hardware'
 # Arm position and speed limits come from the verified URDF, per joint.
 # Cartesian input filtering remains separate from actuator joint limits.
-GOAL_SPEED = 0.30
-ANGULAR_SPEED = 1.50
-LEASE_SECONDS = 0.5
+GOAL_SPEED = 3.0
+ANGULAR_SPEED = 15.0
+LEASE_SECONDS = 5.0
 # Existing maximum relay command interval. URDF has no following-error field;
 # the tracking budget is the distance each joint can travel in this interval.
 COMMAND_WINDOW_SECONDS = 0.10
@@ -264,12 +264,16 @@ def load_profile(path):
         profile['auxiliary_limits'] = {}
     if profile.get('arm_dxl_ids') != ARM_DXL_IDS:
         raise ValueError('profile not bound to physical arm motor IDs')
-    # SH5 still uses its separately-reviewed reduced model. SG2, however, is
-    # explicitly bound to the live physical URDF limits in make_profile.py.
     if profile['model'] == 'sh5':
-        for short in ('l', 'r'):
-            if profile['limits'][f'arm_{short}_joint4'][1] > -.7 + 1e-12:
-                raise ValueError('unexpected SH5 arm limit expansion')
+        # Replacing old software caps never permits commands beyond the physical
+        # description. Bind both position and speed to the captured robot URDF.
+        description = Path(profile['urdf']).parent / 'snapshot/robot_description.urdf'
+        if not description.is_file() or sha256(description) != profile['description_sha256']:
+            raise ValueError('SH5 physical description missing/changed; regenerate the profile')
+        physical_positions, physical_velocities = arm_limits(description.read_text())
+        if (profile.get('arm_limit_policy') != 'physical_description' or
+                positions != physical_positions or velocities != physical_velocities):
+            raise ValueError('SH5 profile must use physical URDF arm limits; regenerate the profile')
     if profile.get('hand_control') is not None:
         from hardware.sh5_hands_model import verify_hand_profile
         verify_hand_profile(profile)

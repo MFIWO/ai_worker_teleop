@@ -97,7 +97,7 @@ class XROverheadPublisher(XRGuidedPublisher):
                 inputs = {s: rigid_pose(getattr(self, f'{s}_controller_matrix')) for s in SIDES}
                 actual = {s: links[s]['wrist'] for s in SIDES}
                 self._diagnostics = self._session.inspect(inputs, actual)
-                if any(now - self._command_rx.get(s, -1e9) > .5 for s in SIDES):
+                if any(now - self._command_rx.get(s, -1e9) > self.FEEDBACK_MAX_AGE for s in SIDES):
                     raise ValueError('Cyclo command feedback stopped')
                 dt = 1/30 if self._last_pub is None else now - self._last_pub
                 goals, elbows, hints = deepcopy(self._goals), deepcopy(self._elbows), deepcopy(self._hints)

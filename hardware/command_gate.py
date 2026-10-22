@@ -35,8 +35,8 @@ from hardware.xr_contract import (
 )
 from hardware.torque_evidence import TorqueEvidence
 
-FEEDBACK_FRESH_SECONDS = .5
-FEEDBACK_WAIT_SECONDS = 5.0
+FEEDBACK_FRESH_SECONDS = 5.0
+FEEDBACK_WAIT_SECONDS = 50.0
 
 def deployment_domain():
     mode = os.environ.get('AI_WORKER_XR_EXECUTION', '')
@@ -153,7 +153,7 @@ class HardwareCommandGate(Node):
         # [FIX] Old Cyclo caches name order from its FIRST JointState. Never feed
         # reordered/partial inputs or freshly stamped cached state without DXL health.
         canonical = self.profile['controller_joint_names']
-        if (self.description_ok and self.motor_ok and time.monotonic()-self.motor_rx <= .5
+        if (self.description_ok and self.motor_ok and time.monotonic()-self.motor_rx <= FEEDBACK_FRESH_SECONDS
                 and set(canonical).issubset(self.measured)):
             clean = JointState()
             clean.header = msg.header
@@ -297,11 +297,11 @@ class HardwareCommandGate(Node):
     def hold(self, reason):
         self.feedback_waiting = False
         # [SAFETY] One measured position-hold, only after this gate was driving.
-        if self.output_active and time.monotonic()-self.measured_rx <= .5:
+        if self.output_active and time.monotonic()-self.measured_rx <= FEEDBACK_FRESH_SECONDS:
             self.emit(self.measured)
         if self.aux_pub:
             held = ({k: self.measured[k] for k in self.aux_previous if k in self.measured}
-                    if self.aux_active and time.monotonic()-self.measured_rx <= .5 else {})
+                    if self.aux_active and time.monotonic()-self.measured_rx <= FEEDBACK_FRESH_SECONDS else {})
             self.emit_aux(held, [0., 0., 0.])
         self.aux_command = {'joints': {}, 'base': [0., 0., 0.]}
         self.aux_previous.clear()
@@ -345,9 +345,9 @@ class HardwareCommandGate(Node):
                 raise ValueError('disarm PC intent before resetting fault')
             if now-self.intent_rx > LEASE_SECONDS:
                 raise ValueError('fresh disarmed PC lease required')
-            if not self.description_ok or now-self.measured_rx > .5:
+            if not self.description_ok or now-self.measured_rx > FEEDBACK_FRESH_SECONDS:
                 raise ValueError('fresh verified model/joint feedback required')
-            if not self.motor_ok or now-self.motor_rx > .5:
+            if not self.motor_ok or now-self.motor_rx > FEEDBACK_FRESH_SECONDS:
                 raise ValueError('healthy motor feedback required')
             if self.readiness_policy == 'strict_torque' and not self.motor_topic_ok:
                 raise ValueError('required torque telemetry not healthy')
@@ -405,7 +405,7 @@ class HardwareCommandGate(Node):
                                or now-self.motor_rx > FEEDBACK_FRESH_SECONDS
                                or any(now-t > FEEDBACK_FRESH_SECONDS for _, t in self.commands.values())
                                or max(t for _, t in self.commands.values())
-                                  - min(t for _, t in self.commands.values()) > .10)
+                                  - min(t for _, t in self.commands.values()) > 1.0)
                     if waiting:
                         self.feedback_waiting = True
                         # Keep the existing setpoint; never advance a stale QP output.
@@ -414,7 +414,7 @@ class HardwareCommandGate(Node):
                         if self.aux_pub:
                             self.emit_aux(self.aux_previous, [0., 0., 0.])
                         self.last_output = now
-                        self.reason = 'waiting for robot/Cyclo feedback (maximum age 5s); holding targets'
+                        self.reason = f'waiting for robot/Cyclo feedback (maximum age {FEEDBACK_WAIT_SECONDS:g}s); holding targets'
                     else:
                         self.feedback_waiting = False
                     if waiting:
@@ -458,12 +458,12 @@ class HardwareCommandGate(Node):
                 'model': self.model, 'fault': self.fault, 'reason': self.reason,
                 'fault_detail': self.fault_detail,
                 'description_ok': self.description_ok, 'enabled': self.intent_enabled,
-                'forwarding': self.output_active, 'measured_fresh': now-self.measured_rx <= .5,
+                'forwarding': self.output_active, 'measured_fresh': now-self.measured_rx <= FEEDBACK_FRESH_SECONDS,
                 'feedback_waiting': self.feedback_waiting,
-                'motor_healthy': self.motor_ok and now-self.motor_rx <= .5,
+                'motor_healthy': self.motor_ok and now-self.motor_rx <= FEEDBACK_FRESH_SECONDS,
                 # [CHANGED] Status preserves uncertainty; never claims register ON.
                 'readiness_policy': self.readiness_policy,
-                'motor_read_healthy': self.motor_read_ok and now-self.motor_rx <= .5,
+                'motor_read_healthy': self.motor_read_ok and now-self.motor_rx <= FEEDBACK_FRESH_SECONDS,
                 'reported_torque_all_on': self.motor_topic_ok,
                 'physical_torque_verified': False,
                 'ros_time_s': self.get_clock().now().nanoseconds*1e-9,

@@ -182,9 +182,9 @@ class _ModelAssertions:
                                    for name in RETAINED_JOINTS})
         for name in ARM_NAMES:
             old, ref, new = [t.find(f"joint[@name='{name}']/limit") for t in (d, c, g)]
-            self.assertEqual(float(new.get('lower')), max(float(old.get('lower')), float(ref.get('lower'))))
-            self.assertEqual(float(new.get('upper')), min(float(old.get('upper')), float(ref.get('upper'))))
-            self.assertEqual(float(new.get('velocity')), min(.35, float(old.get('velocity')), float(ref.get('velocity'))))
+            self.assertEqual(float(new.get('lower')), float(old.get('lower')))
+            self.assertEqual(float(new.get('upper')), float(old.get('upper')))
+            self.assertEqual(float(new.get('velocity')), float(old.get('velocity')))
 
 
 class SH5ModelTests(_ModelAssertions, unittest.TestCase):
@@ -277,16 +277,18 @@ class SH5ModelTests(_ModelAssertions, unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'finite number'):
                 self.build(snapshot=dict(self.snapshot, finger_r_joint12=value))
 
-    def test_simulation_elbow_bound_rejected(self):
+    def test_legacy_control_bounds_do_not_override_physical_description(self):
         tree = ET.fromstring(self.control)
         tree.find("joint[@name='arm_l_joint4']/limit").set('upper', '-.45')
-        with self.assertRaisesRegex(ValueError, 'simulation-expanded'):
-            self.build(control=_xml(tree))
+        xml, _, _, report = self.build(control=_xml(tree))
+        self.assert_limits(self.description, _xml(tree), xml)
+        self.assertEqual(report['arm_limits']['arm_l_joint4'], [-2.9361, 1.0786])
+        self.assertEqual(report['arm_velocity_limits']['arm_l_joint4'], 4.8)
 
-    def test_empty_arm_limit_intersection_rejected(self):
+    def test_invalid_physical_arm_limits_rejected(self):
         tree = ET.fromstring(self.description)
-        tree.find("joint[@name='arm_l_joint4']/limit").set('lower', '0')
-        with self.assertRaisesRegex(ValueError, 'empty conservative'):
+        tree.find("joint[@name='arm_l_joint4']/limit").set('lower', '2')
+        with self.assertRaisesRegex(ValueError, 'invalid position/velocity limits'):
             self.build(description=_xml(tree))
 
     def test_arm_chain_origin_axis_mismatch_rejected(self):
