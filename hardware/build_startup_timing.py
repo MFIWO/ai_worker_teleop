@@ -12,12 +12,65 @@ ROOT = Path('/workspace/ai_worker_xr_startup_steady')
 CPP = Path('src/nodes/ai_worker/vr_controller_node.cpp')
 HEADER = Path('include/cyclo_motion_controller_ros/nodes/ai_worker/vr_controller_node.hpp')
 
+# Official jazzy/651aa55 lacks the feedback watchdog present on the original
+# commissioning installation. Adapt only this exact source, in the build copy.
+STOCK_CPP_SHA256 = 'e524cfdb62069a500057a573941ccfa2dc2e938fd8b59fcab11c156b2c553dde'
+STOCK_HEADER_SHA256 = '2ab195e59a8d348573937eac9703c1c121b7f848110d871f4c3866f3febc6952'
+
+
+def replace_once(text, old, new):
+    if text.count(old) != 1:
+        raise ValueError('Unexpected Cyclo compatibility anchor: ' + old)
+    return text.replace(old, new, 1)
+
+
+def adapt_stock_source(text):
+    if hashlib.sha256(text.encode()).hexdigest() != STOCK_CPP_SHA256:
+        return text
+    text = replace_once(text, '  dt_ = time_step_;', '''  joint_state_timeout_ = this->declare_parameter("joint_state_timeout", 5.0);
+  if (!std::isfinite(joint_state_timeout_) || joint_state_timeout_ <= 0.5) {
+    throw std::runtime_error("joint_state_timeout must be finite and exceed 0.5s");
+  }
+  last_joint_state_time_ = this->now();
+  dt_ = time_step_;''')
+    text = replace_once(text, '    joint_state_received_ = true;',
+                        '    joint_state_received_ = true;\n'
+                        '    last_joint_state_time_ = this->now();')
+    text = replace_once(text, '  reactivate_state_ = msg->data;',
+                        '  syncCommandStateToFeedback();\n'
+                        '  reactivate_state_ = msg->data;')
+    anchor = 'void VRController::controlLoopCallback()'
+    text = replace_once(text, anchor, '''void VRController::syncCommandStateToFeedback()
+{
+  if (joint_state_received_) {
+    q_desired_ = q_;
+  }
+  last_control_time_initialized_ = false;
+}
+
+''' + anchor)
+    anchor = '        // Always compute & publish current gripper poses from measured state.'
+    text = replace_once(text, anchor, '''  if ((this->now() - last_joint_state_time_).seconds() > joint_state_timeout_) {
+    syncCommandStateToFeedback();
+    control_enabled_ = false;
+    start_requested_ = false;
+    activate_pending_ = false;
+    reference_diverged_ = true;
+    RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                         "Joint feedback timed out; fresh feedback and manual restart required");
+    return;
+  }
+
+''' + anchor)
+    return text
+
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def patch_source(text):
+    text = adapt_stock_source(text)
     replacements = {
         '  activate_start_ = this->get_clock()->now();':
         '  this->declare_parameter("activation_delay_seconds", 3.0);\n'
@@ -73,6 +126,14 @@ def patch_source(text):
 
 
 def patch_header(text):
+    if hashlib.sha256(text.encode()).hexdigest() == STOCK_HEADER_SHA256:
+        text = replace_once(text, '  bool joint_state_received_;',
+                            '  bool joint_state_received_;\n'
+                            '  rclcpp::Time last_joint_state_time_;\n'
+                            '  double joint_state_timeout_ = 5.0;')
+        text = replace_once(text, '  void controlLoopCallback();',
+                            '  void controlLoopCallback();\n'
+                            '  void syncCommandStateToFeedback();')
     anchor = '  rclcpp::Time activate_start_;'
     if text.count(anchor) != 1:
         raise ValueError('Unexpected Cyclo activation member')

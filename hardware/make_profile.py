@@ -85,6 +85,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model', required=True, choices=('sg2', 'sh5'))
     parser.add_argument('--hands', action='store_true', help='Enable native SH5 hands with measured finger FK')
+    parser.add_argument('--manual-controls', action='store_true', help='SH5 hands: measured head FK and gated keyboard auxiliary motion')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--controller-urdf', type=Path)
     parser.add_argument('--srdf', type=Path)
@@ -97,6 +98,8 @@ def main():
     a = parser.parse_args()
     if a.hands and a.model != "sh5":
         parser.error("--hands requires --model sh5")
+    if a.manual_controls and not (a.hands and a.model == 'sh5'):
+        parser.error('--manual-controls requires --model sh5 --hands')
     if any(p is None for p in (a.controller_urdf, a.srdf, a.description, a.config)):
         from ament_index_python.packages import get_package_share_directory as share
         models = Path(share('cyclo_motion_controller_models')) / 'models/ai_worker'
@@ -118,8 +121,8 @@ def main():
         if a.hands:
             from hardware.sh5_hands_model import add_measured_fingers
             urdf, srdf, frozen, pairs = add_measured_fingers(
-                urdf, description_text, a.srdf.read_text(), frozen)
-            model_report.update(pairs, movable_dof=55, frozen_joint_count=len(frozen),
+                urdf, description_text, a.srdf.read_text(), frozen, measured_head=a.manual_controls)
+            model_report.update(pairs, movable_dof=57 if a.manual_controls else 55, frozen_joint_count=len(frozen),
                 tool_collision_coverage='SH5 geometry from measured finger positions',
                 retained_movable_joints=[j.get('name') for j in ET.fromstring(urdf).findall('joint')
                                         if j.get('type') != 'fixed'])
@@ -137,6 +140,7 @@ def main():
                 '(both arm joint4 near -1.57 rad), then run_controller.sh. '
                 'No automatic motion or limit expansion has occurred.')
     urdf = resolve_meshes(urdf)
+    manual_collision_urdf = urdf if a.manual_controls else None
     if model_report:
         model_report['mesh_resources_verified'] = True
     if a.model == 'sh5':
@@ -148,6 +152,9 @@ def main():
     paths = {'urdf': a.output / f'{a.model}_hardware_arms.urdf',
              'config': a.output / 'controller.yaml', 'srdf': a.output / 'controller.srdf'}
     contents = {'urdf': urdf, 'config': yaml.safe_dump(cfg, sort_keys=False), 'srdf': srdf}
+    if a.manual_controls:
+        paths['manual_collision_urdf'] = a.output / 'manual_exact_collision.urdf'
+        contents['manual_collision_urdf'] = manual_collision_urdf
     # [DEBUG] Preflight every destination BEFORE any writes. Idempotent, never overwrite drift.
     for k, p in paths.items():
         if p.exists() and p.read_text() != contents[k]:
@@ -158,7 +165,8 @@ def main():
     from hardware.check_collision import check_initial_pose
     collision_report = check_initial_pose(paths['urdf'], paths['srdf'], snapshot,
         cfg['vr_controller']['ros__parameters']['collision_safe_distance'],
-        enforce_margin=a.readiness_policy == 'strict_torque', measured_fingers=a.hands)  # [CHANGED]
+        enforce_margin=a.readiness_policy == 'strict_torque', measured_fingers=a.hands,
+        measured_head=a.manual_controls)
     if not collision_report['native_margin_met']:
         print('[COLLISION DIAGNOSTIC] Initial clearance is positive but below the native CBF margin. '
               'The native QP/CBF, startup tracking guard and reference checker remain unchanged; '
@@ -186,6 +194,7 @@ def main():
     manifest['controller_joint_names'] = [j.get('name') for j in generated.findall('joint')
                                            if j.get('type') not in ('fixed',)]
     manifest['frozen_joints'] = frozen
+    manifest['manual_auxiliary'] = bool(a.manual_controls)
     if a.hands:
         from hardware.sh5_hands_model import HAND_CONTROL, finger_limits
         manifest['hand_control'] = HAND_CONTROL

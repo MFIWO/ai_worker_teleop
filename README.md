@@ -1,5 +1,32 @@
 # AI Worker Quest customizations
 
+## SH5 배포와 실행 (현재 기준)
+
+`robotis-applications`는 SH5 팔·손 Teleop 중심 브랜치입니다. `main`은 같은
+Teleop 기반과 VR·Loop 녹화/키보드 연동을 함께 제공합니다.
+
+새 PC 설치, 다른 AI Worker 배포, 업데이트, 두 명령 실행 및 종료 방법:
+[ai_worker_hand.txt](docs/ai_worker_hand.txt).
+
+팔·손 Teleop만 실행할 때 PC의 터미널 두 개에서:
+
+```bash
+bash teleop.sh robot --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop off --bringup
+```
+
+```bash
+bash teleop.sh pc --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop off
+```
+
+`--bringup`은 follower가 없으면 기존 SH5 초기화 동작을 실행합니다. 양손·몸
+추적을 유지하고 한 손 pinch + 반대 손 squeeze 3초로 시작/중단합니다.
+종료할 때 두 터미널에서 Ctrl+C를 누르고 `[STOP]` 정리를 기다리세요.
+이 세션이 시작한 bringup/router와 초기화 자식 노드도 함께 정리됩니다.
+Loop·C 키보드 연동은 두 명령 모두 `--loop vr`로 실행하고 PC의 Loop를 먼저 엽니다.
+
+SH5 two-command startup, continuous VR Loop recording and Loop-focused keyboard
+controls: [hardware/VR_LOOP.md](hardware/VR_LOOP.md).
+
 See [QUEST_TELEOP.md](QUEST_TELEOP.md) for this branch and the matching robot setup.
 
 ## Wrist-delta retargeting (SG2 / SH5)

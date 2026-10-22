@@ -14,7 +14,12 @@ import unittest
 import xml.etree.ElementTree as ET
 
 import numpy as np
-import coal
+try:
+    import coal
+except ModuleNotFoundError as error:
+    if error.name != 'coal':
+        raise
+    import hppfcl as coal
 import pinocchio as pin
 
 from hardware.collision_primitives import enclose_collision_meshes

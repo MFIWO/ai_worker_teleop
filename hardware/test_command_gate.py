@@ -14,7 +14,7 @@ from dynamixel_interfaces.msg import DynamixelState
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from hardware.command_gate import HardwareCommandGate
+from hardware.command_gate import HardwareCommandGate, FEEDBACK_FRESH_SECONDS, FEEDBACK_WAIT_SECONDS
 from hardware.test_hardware_contract import fixture
 from hardware.xr_contract import ARM_NAMES, ARM_DXL_IDS, GOAL_SPEED, load_profile, sha256
 from hardware.aux_controls import read_aux_limits, AUX_TOPICS
@@ -77,6 +77,36 @@ class GateTests(unittest.TestCase):
     def test_default_is_disarmed(self):
         self.gate.tick();self.assertEqual(self.sent,[])
 
+    def test_manual_keyboard_while_arms_held_expires_without_forwarding_arms(self):
+        gate=self.gate
+        gate.profile['manual_auxiliary']=True
+        gate.profile['auxiliary_limits']={'head_joint1':dict(lower=-1.,upper=1.,velocity=.25)}
+        gate.measured['head_joint1']=0.
+        gate.aux_pub={'head':object()}
+        auxiliary=[]
+        gate.emit_aux=lambda joints,base:auxiliary.append((dict(joints),list(base)))
+        data=dict(model='sg2',enabled=False,session_id='keyboard_fixture',sequence=1,
+                  manual_enabled=True,manual_aux={'joints':{'head_joint1':.01},'base':[.1,0.,0.]})
+        gate.intent(String(data=json.dumps(data)))
+        gate.tick()
+        self.assertFalse(gate.intent_enabled)
+        self.assertEqual(self.sent,[])
+        self.assertEqual(auxiliary[-1][1],[.1,0.,0.])
+        receipt=gate.manual_rx
+        gate.intent(String(data=json.dumps(data)))
+        self.assertEqual(gate.manual_rx,receipt)
+        gate.manual_rx=time.monotonic()-.36
+        gate.tick()
+        self.assertFalse(gate.manual_enabled)
+        self.assertEqual(auxiliary[-1][1],[0.,0.,0.])
+        self.assertEqual(self.sent,[])
+
+    def test_legacy_profile_refuses_manual_keyboard_authority(self):
+        self.gate.intent(String(data=json.dumps(dict(model='sg2',enabled=False,session_id='keyboard_fixture',
+            sequence=1,manual_enabled=True,manual_aux={'base':[.1,0.,0.]}))))
+        self.assertFalse(self.gate.manual_enabled)
+        self.assertEqual(self.sent,[])
+
     def test_clock_offset_ignored_but_lease_order_and_watchdog_preserved(self):
         self.intent(False)
         data={'model':'sg2','enabled':True,'session_id':'fixture','sequence':self.sequence+1,
@@ -84,7 +114,7 @@ class GateTests(unittest.TestCase):
         self.gate.intent(String(data=json.dumps(data)))
         self.assertTrue(self.gate.intent_enabled)
         self.assertGreater(self.gate.intent_rx,0.)
-        self.gate.intent_rx=time.monotonic()-5.01
+        self.gate.intent_rx=time.monotonic()-FEEDBACK_WAIT_SECONDS-.01
         last=self.gate.intent_rx
         self.gate.intent(String(data=json.dumps(data)))
         self.assertEqual(self.gate.intent_rx,last)
@@ -149,7 +179,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(set(self.sent[-1]),set().union(*ARM_NAMES.values()))
 
     def test_pc_disconnect_holds_and_latches(self):
-        self.start();self.gate.intent_rx=time.monotonic()-5.01
+        self.start();self.gate.intent_rx=time.monotonic()-FEEDBACK_WAIT_SECONDS-.01
         self.gate.tick()
         self.assertIn('lease expired',self.gate.fault)
         self.assertFalse(self.gate.output_active)
@@ -158,7 +188,7 @@ class GateTests(unittest.TestCase):
     def test_short_pc_intent_gap_holds_and_resumes(self):
         self.start()
         held = dict(self.sent[-1])
-        self.gate.intent_rx = time.monotonic()-1.
+        self.gate.intent_rx = time.monotonic()-FEEDBACK_FRESH_SECONDS-.1
         self.gate.tick()
         self.assertIsNone(self.gate.fault)
         self.assertTrue(self.gate.feedback_waiting)
@@ -169,8 +199,8 @@ class GateTests(unittest.TestCase):
         self.assertIsNone(self.gate.fault)
         self.assertFalse(self.gate.feedback_waiting)
 
-    def test_fresh_JS_cannot_hide_motor_read_loss_over_five_seconds(self):
-        self.start();self.gate.motor_rx=time.monotonic()-5.01
+    def test_fresh_JS_cannot_hide_motor_read_loss_over_configured_wait(self):
+        self.start();self.gate.motor_rx=time.monotonic()-FEEDBACK_WAIT_SECONDS-.01
         self.gate.tick();self.assertIn('motor read',self.gate.fault)
 
     def test_feedback_gaps_hold_last_output_then_recover_without_disarming(self):
@@ -183,9 +213,9 @@ class GateTests(unittest.TestCase):
                 for values, _ in self.gate.commands.values():
                     values['arm_l_joint1' if 'arm_l_joint1' in values else 'arm_r_joint1'] = .1
                 if channel == 'command':
-                    self.gate.commands = {s:(v,now-1.) for s,(v,_) in self.gate.commands.items()}
+                    self.gate.commands = {s:(v,now-FEEDBACK_FRESH_SECONDS-.1) for s,(v,_) in self.gate.commands.items()}
                 else:
-                    setattr(self.gate, channel+'_rx', now-1.)
+                    setattr(self.gate, channel+'_rx', now-FEEDBACK_FRESH_SECONDS-.1)
                 self.gate.tick()
                 self.assertIsNone(self.gate.fault)
                 self.assertTrue(self.gate.intent_enabled)
@@ -198,14 +228,14 @@ class GateTests(unittest.TestCase):
                 self.assertIsNone(self.gate.fault)
                 self.assertFalse(self.gate.feedback_waiting)
 
-    def test_feedback_and_output_loss_over_five_seconds_latches(self):
+    def test_feedback_and_output_loss_over_configured_wait_latches(self):
         for channel in ('measured', 'command'):
             with self.subTest(channel=channel):
                 self.start()
                 if channel == 'measured':
-                    self.gate.measured_rx = time.monotonic()-5.01
+                    self.gate.measured_rx = time.monotonic()-FEEDBACK_WAIT_SECONDS-.01
                 else:
-                    self.gate.commands = {s:(v,time.monotonic()-5.01)
+                    self.gate.commands = {s:(v,time.monotonic()-FEEDBACK_WAIT_SECONDS-.01)
                                           for s,(v,_) in self.gate.commands.items()}
                 self.gate.tick()
                 self.assertIsNotNone(self.gate.fault)
@@ -215,7 +245,7 @@ class GateTests(unittest.TestCase):
 
     def test_command_skew_waits_for_a_coherent_pair(self):
         self.start()
-        target,_=self.gate.commands['left'];self.gate.commands['left']=(target,time.monotonic()-.2)
+        target,_=self.gate.commands['left'];self.gate.commands['left']=(target,time.monotonic()-1.01)
         self.gate.tick()
         self.assertIsNone(self.gate.fault)
         self.assertTrue(self.gate.feedback_waiting)
@@ -261,7 +291,7 @@ class GateTests(unittest.TestCase):
         self.assertFalse(response.success)
         self.assertIsNotNone(self.gate.fault)
         self.gate.motor_ok=True
-        self.gate.measured_rx=time.monotonic()-1.
+        self.gate.measured_rx=time.monotonic()-FEEDBACK_FRESH_SECONDS-.1
         response=self.gate.reset_fault(Trigger.Request(),Trigger.Response())
         self.assertFalse(response.success)
         self.assertIsNotNone(self.gate.fault)
@@ -388,7 +418,7 @@ class GateTests(unittest.TestCase):
         self.assertTrue(any('head_joint1' in msg.joint_names for msg in self.aux_messages))
         self.assertTrue(any('lift_joint' in msg.joint_names for msg in self.aux_messages))
         self.assertEqual(self.base_messages[-1].linear.x, .1)
-        self.gate.intent_rx=time.monotonic()-5.01
+        self.gate.intent_rx=time.monotonic()-FEEDBACK_WAIT_SECONDS-.01
         self.gate.tick()
         self.assertIn('lease expired', self.gate.fault)
         self.assertEqual(self.base_messages[-1].linear.x, 0.)

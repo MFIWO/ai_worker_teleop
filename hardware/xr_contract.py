@@ -239,6 +239,10 @@ def load_profile(path):
     for key in ('urdf', 'srdf', 'config'):
         if sha256(profile[key]) != profile[key + '_sha256']:
             raise ValueError(f'{key} changed after profile generation')
+    if profile.get('manual_auxiliary'):
+        key = 'manual_collision_urdf'
+        if not profile.get(key) or sha256(profile[key]) != profile.get(key + '_sha256'):
+            raise ValueError('Manual collision description missing/changed; regenerate profile')
     positions, velocities = arm_limits(Path(profile['urdf']).read_text())
     if profile['limits'] != positions:
         raise ValueError('profile position limits differ from verified URDF')
@@ -254,7 +258,7 @@ def load_profile(path):
     profile['time_policy'] = 'local_monotonic_receipt'
     if profile.get('goal_speed') != GOAL_SPEED:
         raise ValueError('unknown Cartesian goal speed')
-    if profile['model'] == 'sg2':
+    if profile['model'] == 'sg2' or profile.get('manual_auxiliary'):
         from hardware.aux_controls import read_aux_limits
         # Controller meshes/models may simplify head and tooling. Auxiliary
         # limits are taken from the hashed physical description instead.
@@ -263,8 +267,10 @@ def load_profile(path):
         if description.is_file():
             if sha256(description) != profile['description_sha256']:
                 raise ValueError('physical auxiliary description hash mismatch')
-            profile['auxiliary_limits'] = read_aux_limits(description.read_text(), sg2_legacy_gripper=True)
-            profile['gripper_command_policy'] = 'original_sg2_vr_1.3rad'
+            profile['auxiliary_limits'] = read_aux_limits(description.read_text(),
+                sg2_legacy_gripper=profile['model'] == 'sg2', include_grippers=profile['model'] == 'sg2')
+            if profile['model'] == 'sg2':
+                profile['gripper_command_policy'] = 'original_sg2_vr_1.3rad'
     else:
         profile['auxiliary_limits'] = {}
     if profile.get('arm_dxl_ids') != ARM_DXL_IDS:

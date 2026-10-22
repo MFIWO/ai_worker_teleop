@@ -1,0 +1,193 @@
+AI Worker SH5 팔·손 통합 Teleop / VR·Loop 적용 안내
+갱신: 2026-10-22 (KST)
+
+============================================================
+0. 브랜치 선택과 기본 조건
+============================================================
+저장소: https://github.com/MFIWO/ai_worker_teleop
+
+robotis-applications: SH5 팔·손 통합 Teleop 중심, --loop off
+main: 같은 Teleop 기반 + 이번 VR·Loop 녹화/키보드 연동, --loop vr
+Loop까지 사용할 PC는 main을 받으면 팔·손 Teleop 코드도 함께 포함됩니다.
+기존 main의 SG2 backport/Loop 참고 코드는 기록으로 보존됩니다.
+
+현재 네트워크 예시:
+  PC_IP=192.168.5.2
+  ROBOT_IP=192.168.5.101
+  SSH 별칭=ffw-SNPR48A1114.local
+다른 PC/로봇에서는 실제 주소로 바꾸세요. PC_IP는 Quest가 접속할 PC 주소입니다.
+
+PC 조건: Docker Engine + Docker Compose v2, robotis-applications 컨테이너.
+로봇 조건: ai_worker 컨테이너, ROS Jazzy, Cyclo 소스/빌드 환경,
+SH5 follower, 원본 ROBOTIS retargeting_teleop 및 SH5 손 모델.
+이번 호환 코드는 Cyclo jazzy 651aa55와 기존 commissioning 소스 기준입니다.
+다른 소스 버전은 빌드 검증에서 거절될 수 있습니다.
+Loop 모드에는 로봇의 ffw_loop_streamer와 loop_sdk, PC의 Loop 앱도 필요합니다.
+로봇의 기존 Loop 패키지는 이 저장소의 오래된 참고 패키지로 덮어쓰지 않습니다.
+설치/소스 복사는 로봇을 움직이지 않습니다. --bringup 실행은 초기화 동작을 포함합니다.
+
+============================================================
+1. 새 PC에 clone / PC 컨테이너 설치
+============================================================
+# Loop 통합판이면 main, Teleop 중심이면 robotis-applications
+BRANCH=main
+mkdir -p ~/Downloads/external_repos
+cd ~/Downloads/external_repos
+git clone --branch "$BRANCH" --single-branch \
+  https://github.com/MFIWO/ai_worker_teleop.git ai_worker_teleop_deploy
+cd ai_worker_teleop_deploy
+
+docker --version
+docker compose version
+docker ps
+
+# Docker 권한 오류일 때 한 번 적용한 뒤, 생성된 새 셸에서 진행:
+# sudo usermod -aG docker "$USER"
+# newgrp docker
+# docker ps
+
+# PC 컨테이너가 없을 때 실행 (첫 빌드에는 인터넷이 필요할 수 있음):
+bash docker/container.sh start
+bash hardware/install_pc.sh
+
+# 실제 Quest 접속 PC 주소로 인증서 생성. 새 CA가 생성되면 Quest에서 신뢰 설정 필요:
+PC_IP=192.168.5.2
+docker exec -it robotis-applications bash /root/gen_cert.sh "$PC_IP"
+
+주의: 이미 있는 clone에는 git clone을 반복하지 말고 다음의 업데이트 절차를 사용합니다.
+컨테이너가 bind mount 중인 저장소 폴더를 실행 중에 이동/이름 변경하지 마세요.
+
+============================================================
+2. 기존 PC 소스 업데이트
+============================================================
+# 두 Teleop 터미널을 Ctrl+C로 종료하고 [STOP] 정리가 끝난 뒤 진행.
+cd ~/Downloads/external_repos/ai_worker_teleop_deploy
+BRANCH=$(git branch --show-current)
+git pull --ff-only origin "$BRANCH"
+bash hardware/install_pc.sh
+
+============================================================
+3. PC에서 로봇으로 배포 / 설치 / 빌드
+============================================================
+ROBOT_IP=192.168.5.101
+cd ~/Downloads/external_repos/ai_worker_teleop_deploy
+
+rsync -av \
+  --exclude='.git/' --exclude='__pycache__/' --exclude='*.pyc' \
+  --exclude='*.pem' --exclude='*.key' --exclude='docker/workspace/' \
+  ./ "robotis@$ROBOT_IP:~/ai_worker_teleop_sh5/"
+
+ssh "robotis@$ROBOT_IP" \
+  'cd ~/ai_worker_teleop_sh5 && bash hardware/install_robot.sh'
+
+ssh "robotis@$ROBOT_IP" 'docker exec -i ai_worker bash -s' <<'ROBOT_BUILD'
+set -e
+source /opt/ros/jazzy/setup.bash
+source /root/ros2_ws/install/setup.bash
+export PYTHONPATH="/opt/venv/lib/python3.12/site-packages:${PYTHONPATH:-}"
+cd /workspace/ai_worker_xr
+python3 -m hardware.build_sh5_hands --verify-only || \
+  python3 -m hardware.build_sh5_hands --rebuild
+ROBOT_BUILD
+
+이 빌드는 /workspace/ai_worker_xr_sh5_hands의 별도 실행 파일을 만듭니다.
+원본 Cyclo 소스/underlay와 기존 follower 설정을 덮어쓰지 않습니다.
+소스가 그대로이고 빌드 검증이 통과하면 재빌드는 생략됩니다.
+
+============================================================
+4A. 팔·손 Teleop만 실행 — PC 터미널 두 개
+============================================================
+# 터미널 1: robot session (--bringup은 없는 router/follower를 시작)
+bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh robot \
+  --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop off --bringup
+
+# 터미널 2: PC Vuer
+bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh pc \
+  --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop off
+
+Quest 접속:
+https://192.168.5.2:8012?ws=wss://192.168.5.2:8012
+양손·몸 추적을 유지하고 한 손 pinch + 반대 손 squeeze 3초로 시작/중단합니다.
+--loop off에서는 Loop 키보드 브리지를 실행하지 않으므로 C 키 조작을 사용하지 않습니다.
+SH5 follower가 새로 시작되면 손/팔/목/lift/steering의 기존 초기화 동작이 실행됩니다.
+
+============================================================
+4B. 팔·손 + VR·Loop 녹화/키보드 — PC 터미널 두 개
+============================================================
+PC에서 Loop 앱을 먼저 엽니다. 물리 leader는 종료한 상태로 진행합니다.
+
+# 터미널 1: robot session
+bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh robot \
+  --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop vr --bringup
+
+# 터미널 2: PC Vuer + Loop 키보드
+bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh pc \
+  --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop vr
+
+PC를 먼저 실행해도 Zenoh 7447 포트를 최대 120초 기다립니다.
+[WAIT ZENOH]가 나오면 다른 터미널에서 robot 명령을 실행합니다.
+Loop source: robotis-vr-sh5 / robot type: ffw_sh5_vr
+녹화 시작은 Loop에서 별도 실행합니다. C는 녹화 시작 키가 아닙니다.
+카메라 없이 joint/status만 보내려면 robot 명령에 --loop-no-camera를 추가합니다.
+
+Loop 창에 포커스가 있을 때:
+  C: 팔·손 시작 / HOLD / 재개
+  WASD: mobile 전후좌우
+  O/P: 왼쪽/오른쪽 회전
+  방향키: 목 tilt/pan
+  U/I: lift 상승/하강
+  Shift+A 또는 Loop 버튼: 녹화 시작 (검토 화면에서는 Loop의 기존 기능)
+  V 짧게: 검토 화면에서 실패 저장
+  V 길게: 검토 화면에서 폐기
+Loop UI의 C/Hold C 표시는 그대로지만 VR 브리지가 이 키 기능을 V로 전달합니다.
+
+U/I는 leader와 같은 실측 위치 ±10mm 목표를 100Hz로 갱신합니다.
+이는 목표 offset이며 실제 이동 속도는 모터 응답과 물리 한계에 따릅니다.
+C HOLD 중에도 같은 에피소드의 영상/토픽/데이터는 계속 기록하고 paused를 남깁니다.
+학습용으로 제외할 때는 action_valid/paused를 기준으로 모든 스트림을 함께 처리합니다.
+
+베이스 이동 시 팔은 HOLD됩니다. 이동 키를 놓아도 키보드는 계속 사용할 수 있습니다.
+이동 후 C를 누르면 충돌 프로필 갱신을 시작합니다. 이때 잠시 키보드 동작이 차단됩니다.
+[BASE RECAPTURED] 후 키를 놓고 C를 다시 눌러 팔을 재개합니다.
+[LOOP FOCUS] inactive면 Loop 창을 클릭하고 키를 놓은 뒤 다시 누르세요.
+[LOOP KEYS BLOCKED]에는 프로필/피드백/fault 등 차단 이유가 출력됩니다.
+
+============================================================
+5. 종료 — bringup 노드가 남지 않게
+============================================================
+PC/Vuer 터미널에서 Ctrl+C, robot session 터미널에서도 Ctrl+C를 누릅니다.
+robot session의 [STOP] 정리가 끝날 때까지 SSH/터미널을 닫지 않습니다.
+이 세션이 시작한 controller, retargeter, Loop streamer, SH5 follower,
+손 초기화 executor 등 launch 자식, Zenoh router가 순서대로 종료됩니다.
+launch 부모가 먼저 종료된 경우에도 고유 소유 표식이 있는 자식을 정리합니다.
+다른 곳에서 이미 실행 중이어서 재사용한 외부 follower/router는 소유 대상이 아닙니다.
+이전 버전이 남긴 bringup은 새 버전의 소유 표식이 없으므로 한 번 별도로 정리해야 합니다.
+
+# 로봇 컨테이너의 PID/실행 상태 확인 (호스트 PID와 혼동하지 않기):
+ROBOT_IP=192.168.5.101
+ssh "robotis@$ROBOT_IP" 'docker exec ai_worker ps -eo pid,args'
+
+# 이전 launch를 정리할 때: 위 목록의 정확한 SH5 ros2 launch PID를 사용
+# ssh "robotis@$ROBOT_IP" 'docker exec ai_worker kill -INT <컨테이너의_SH5_launch_PID>'
+
+로봇 host에서 ros2가 없다는 것은 ROS가 컨테이너에 설치돼 있기 때문입니다.
+# ROS 노드 목록:
+ssh "robotis@$ROBOT_IP" 'docker exec -i ai_worker bash -s' <<'ROS_LIST'
+source /opt/ros/jazzy/setup.bash
+source /root/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=30 RMW_IMPLEMENTATION=rmw_zenoh_cpp
+ros2 node list
+ROS_LIST
+
+============================================================
+6. Git push / 다른 장비에 적용
+============================================================
+팔·손 Teleop 변경을 robotis-applications에 올릴 때:
+  git push origin robotis-applications
+VR·Loop 통합 변경을 main에 올릴 때 (main checkout에서):
+  git push origin main
+
+다른 PC는 1번에서 브랜치를 선택해 clone하고 3번으로 로봇에 배포합니다.
+이미 clone한 PC는 2번 git pull 후 3번 배포를 반복합니다.
+코드 수정은 commit한 뒤 push해야 다른 장비의 pull에 반영됩니다.
+자세한 기록 채널/모델 설명: hardware/VR_LOOP.md

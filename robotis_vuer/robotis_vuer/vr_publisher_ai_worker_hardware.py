@@ -278,8 +278,14 @@ class HardwareXRPublisher(XROverheadPublisher):
                             not self._controller_fault_latched and self._resume_bridge_targets is None),
             'session_id': self._session_id, 'sequence': self._intent_sequence,
             'phase': self._phase, 'ros_time_s': self.get_clock().now().nanoseconds*1e-9,
+            'tracking_fresh': self._tracking_input_state() == 'fresh',
+            'robot_feedback_fresh': self._feedback_input_state(time.monotonic()) == 'fresh',
             'aux': {'joints': self._aux_joints, 'base': self._aux_base} if aux_enabled else {},
+            **self._extra_intent(time.monotonic()),
         })))
+
+    def _extra_intent(self, now):
+        return {}
 
     def _query_profile(self):
         if not hasattr(self, '_gate_client'):

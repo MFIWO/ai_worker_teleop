@@ -57,6 +57,10 @@ class HardwareCommandGate(Node):
         self.declare_parameter('profile_json', json.dumps(public_profile),
                                ParameterDescriptor(read_only=True))
         self.model = self.profile['model']
+        self.aux_collision = None
+        if self.profile.get('manual_auxiliary'):
+            from hardware.check_collision import AuxiliaryCollisionGuard
+            self.aux_collision = AuxiliaryCollisionGuard(self.profile)
         # [CHANGED] Old profiles remain strict; normal launcher selects explicitly.
         self.readiness_policy = self.profile.get('readiness_policy', 'strict_torque')
         self.description_ok = False
@@ -85,6 +89,9 @@ class HardwareCommandGate(Node):
         self.aux_command = {'joints': {}, 'base': [0., 0., 0.]}
         self.aux_previous = {}
         self.aux_active = False
+        self.manual_enabled = False
+        self.manual_rx = -math.inf
+        self.manual_last_output = time.monotonic()
         self.reason = 'waiting for measured robot_description/joints and manual X+A'
         self.sequence = -1
         self.gate_instance = uuid.uuid4().hex
@@ -114,7 +121,9 @@ class HardwareCommandGate(Node):
         for s in SIDES:
             self.subs.append(self.create_subscription(
                 JointTrajectory, private_topic(self.model, s), lambda msg, side=s: self.command(msg, side), qos))
-        self.timer = self.create_timer(.02, self.tick)
+        # Match the native SH5 arm controller's 100 Hz streaming cadence.
+        # The gate still applies measured-state checks and URDF velocity slew.
+        self.timer = self.create_timer(.01 if self.model == 'sh5' else .02, self.tick)
         self.reset_service = self.create_service(Trigger, '/xr_hardware/reset_fault', self.reset_fault)
         self.get_logger().info(f'[HARDWARE GATE] {self.model}; inactive; auxiliary controls={bool(self.aux_pub)}.')
         self.get_logger().info('[HARDWARE GATE LIMITS] ' + json.dumps({
@@ -203,6 +212,11 @@ class HardwareCommandGate(Node):
                 raise ValueError('new PC session attempted to begin already enabled')
             self.pc_session, self.sequence = session, sequence
             aux = validate_aux(data.get('aux', {}), self.profile['auxiliary_limits'])
+            manual = data.get('manual_enabled', False)
+            if not isinstance(manual, bool) or (manual and not self.profile.get('manual_auxiliary')):
+                raise ValueError('manual controls require a measured-head SH5 profile')
+            if manual:
+                aux = validate_aux(data.get('manual_aux', {}), self.profile['auxiliary_limits'])
             self.intent_rx = time.monotonic()
             enabled = data['enabled']
             self.pc_intent_enabled = enabled
@@ -214,9 +228,13 @@ class HardwareCommandGate(Node):
             if not enabled and self.intent_enabled:
                 self.hold('manual disarm or publisher guard')
             self.intent_enabled = enabled
-            self.aux_command = aux if enabled else {'joints': {}, 'base': [0., 0., 0.]}
+            if self.manual_enabled and not manual and self.aux_active:
+                self.emit_aux({k: self.measured[k] for k in self.aux_previous if k in self.measured}, [0., 0., 0.])
+                self.aux_previous.clear()
+            self.manual_enabled, self.manual_rx = manual, time.monotonic()
+            self.aux_command = aux if enabled or manual else {'joints': {}, 'base': [0., 0., 0.]}
         except (KeyError, ValueError, TypeError) as error:
-            if self.intent_enabled:
+            if self.intent_enabled or self.manual_enabled:
                 self.latch('invalid lease: ' + str(error))
 
     def command(self, msg, side):
@@ -296,6 +314,7 @@ class HardwareCommandGate(Node):
         self.aux_active = bool(joints or any(base))
 
     def hold(self, reason):
+        self.manual_enabled = False
         self.feedback_waiting = False
         # [SAFETY] One measured position-hold, only after this gate was driving.
         if self.output_active and time.monotonic()-self.measured_rx <= FEEDBACK_FRESH_SECONDS:
@@ -376,6 +395,23 @@ class HardwareCommandGate(Node):
         if self.readiness_policy == 'strict_torque' and not self.motor_topic_ok:
             self.motor_ok = False
         try:
+            # Manual keyboard motion can continue while arms are explicitly held.
+            # It uses the same unique follower writer, physical limits and motor
+            # checks, with a shorter lease than the VR tracking grace window.
+            if self.manual_enabled and self.fault is None:
+                fresh = (now-self.manual_rx <= .35 and self.description_ok and self.motor_ok
+                         and now-self.motor_rx <= .5 and now-self.measured_rx <= .5)
+                if not fresh:
+                    self.hold('manual keyboard lease/feedback expired')
+                elif not self.intent_enabled:
+                    if now-self.last_graph > .25:
+                        self.graph()
+                        self.last_graph = now
+                    output = slew_aux(self.aux_command['joints'], self.aux_previous, self.measured,
+                                      self.profile['auxiliary_limits'], now-self.manual_last_output)
+                    if self.aux_collision:self.aux_collision.validate(self.measured, output)
+                    self.emit_aux(output, self.aux_command['base'])
+                    self.aux_previous, self.manual_last_output = output, now
             if self.intent_enabled and self.fault is None:
                 if now-self.intent_rx > FEEDBACK_WAIT_SECONDS:
                     raise ValueError('PC intent lease expired')
@@ -439,6 +475,7 @@ class HardwareCommandGate(Node):
                     if self.aux_pub:
                         aux_output = slew_aux(self.aux_command['joints'], self.aux_previous,
                                               self.measured, self.profile['auxiliary_limits'], elapsed)
+                        if self.aux_collision:self.aux_collision.validate(self.measured, aux_output)
                         self.aux_previous = aux_output
                     self.emit(output)
                     if self.aux_pub:
@@ -461,6 +498,7 @@ class HardwareCommandGate(Node):
                 'description_ok': self.description_ok, 'enabled': self.intent_enabled,
                 'forwarding': self.output_active, 'measured_fresh': now-self.measured_rx <= FEEDBACK_FRESH_SECONDS,
                 'feedback_waiting': self.feedback_waiting,
+                'manual_active': self.manual_enabled and self.aux_active,
                 'motor_healthy': self.motor_ok and now-self.motor_rx <= FEEDBACK_FRESH_SECONDS,
                 # [CHANGED] Status preserves uncertainty; never claims register ON.
                 'readiness_policy': self.readiness_policy,

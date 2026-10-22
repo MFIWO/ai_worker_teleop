@@ -11,9 +11,10 @@ FINGER_NAMES = {side: tuple(f'finger_{short}_joint{i}' for i in range(1, 21))
                 for side, short in (('left', 'l'), ('right', 'r'))}
 FINGERS = frozenset().union(*FINGER_NAMES.values())
 CONTROLLER_JOINTS = frozenset(RETAINED_JOINTS) | FINGERS
+HEAD_JOINTS = frozenset(('head_joint1', 'head_joint2'))
 
 
-def add_measured_fingers(reduced_urdf, description, source_srdf, frozen):
+def add_measured_fingers(reduced_urdf, description, source_srdf, frozen, *, measured_head=False):
     """Restore only the 40 original finger joints; leave arm joints untouched.
 
     The matching native executable fixes their QP velocities at zero and
@@ -22,7 +23,8 @@ def add_measured_fingers(reduced_urdf, description, source_srdf, frozen):
     """
     original = ET.fromstring(description)
     tree = ET.fromstring(reduced_urdf)
-    for name in sorted(FINGERS):
+    restored = FINGERS | HEAD_JOINTS if measured_head else FINGERS
+    for name in sorted(restored):
         old = tree.find(f"joint[@name='{name}']")
         new = original.find(f"joint[@name='{name}']")
         if old is None or new is None or old.get('type') != 'fixed' or new.get('type') != 'revolute':
@@ -35,7 +37,7 @@ def add_measured_fingers(reduced_urdf, description, source_srdf, frozen):
     # In particular, fingers are no longer one fixed cluster with the wrist.
     srdf, report = _collision_srdf(root, links, joints, source_srdf)
     return text, ET.tostring(srdf, encoding='unicode'), {
-        name: value for name, value in frozen.items() if name not in FINGERS}, report
+        name: value for name, value in frozen.items() if name not in restored}, report
 
 
 def finger_limits(text):
@@ -61,10 +63,12 @@ def verify_hand_profile(profile):
         raise ValueError('Expected SH5 measured-finger profile')
     tree = ET.parse(profile['urdf']).getroot()
     movable = {j.get('name') for j in tree.findall('joint') if j.get('type') != 'fixed'}
-    if movable != CONTROLLER_JOINTS or set(profile['controller_joint_names']) != movable:
-        raise ValueError('SH5 hands require exactly 14 arm + lift + 40 finger joints')
-    if FINGERS.intersection(profile.get('frozen_joints', {})):
-        raise ValueError('Moving fingers cannot use frozen-posture collision geometry')
+    expected = CONTROLLER_JOINTS | HEAD_JOINTS if profile.get('manual_auxiliary') else CONTROLLER_JOINTS
+    if movable != expected or set(profile['controller_joint_names']) != movable:
+        raise ValueError('Unexpected joints in SH5 measured-finger/head model')
+    moving = FINGERS | (HEAD_JOINTS if profile.get('manual_auxiliary') else frozenset())
+    if moving.intersection(profile.get('frozen_joints', {})):
+        raise ValueError('Measured fingers/head cannot use frozen-posture collision geometry')
     limits = finger_limits(Path(profile['urdf']).read_text())
     if profile.get('finger_limits') != limits:
         raise ValueError('Finger bounds differ from hashed controller URDF')

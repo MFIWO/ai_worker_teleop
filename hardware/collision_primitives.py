@@ -102,7 +102,7 @@ def enclose_collision_meshes(urdf_text: str, *, padding_m: float = 1e-6):
     finite nonuniform scales are supported; unresolved, empty, malformed, and
     nonpositive-scale meshes fail instead of producing an unchecked model.
 
-    Only the existing numpy and coal dependencies are used. No trimesh/Assimp
+    Only numpy and the installed coal or hppfcl bindings are used. No trimesh/Assimp
     Python dependency or node is needed. Conservative boxes can introduce false
     collisions, so the caller must recheck initial clearance and controller timing.
     """
@@ -127,8 +127,14 @@ def enclose_collision_meshes(urdf_text: str, *, padding_m: float = 1e-6):
         raise ValueError('expected an expanded robot URDF')
     try:
         import coal
-    except ImportError as error:
-        raise RuntimeError('the existing robot coal Python bindings are required; source its ROS environment') from error
+    except ModuleNotFoundError as error:
+        if error.name != 'coal':
+            raise
+        try:
+            # ROS Jazzy's HPP-FCL 2.x exposes the same verified mesh loader API.
+            import hppfcl as coal
+        except ImportError as error:
+            raise RuntimeError('robot coal or hppfcl Python bindings are required; source its ROS environment') from error
 
     # Use a non-cached loader: identical paths with different scales must not
     # alias loader-cached geometry. Our own cache includes the complete scale.
@@ -225,6 +231,7 @@ def enclose_collision_meshes(urdf_text: str, *, padding_m: float = 1e-6):
         'conservative': True, 'exact_mesh_geometry': False,
         'source_urdf_sha256': hashlib.sha256(urdf_text.encode()).hexdigest(),
         'coal_version': getattr(coal, '__version__', 'unknown'),
+        'collision_backend': coal.__name__,
         'mesh_count': len(entries), 'unique_scaled_mesh_count': len(scaled_cache),
         'scale_semantics': 'coal local AABB already includes mesh scale; never multiply it twice',
         'collision_pairs_changed': False, 'kinematics_changed': False,

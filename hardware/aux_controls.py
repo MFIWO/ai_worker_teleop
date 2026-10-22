@@ -11,11 +11,14 @@ BASE_LIMITS = (.2, .2, 1 / 3)
 SG2_LEGACY_GRIPPER_MAX_POSITION = 1.3
 
 
-def read_aux_limits(text, *, sg2_legacy_gripper=False):
+def read_aux_limits(text, *, sg2_legacy_gripper=False, include_grippers=True):
     """Read URDF limits; SG2 may explicitly restore the original VR command range."""
     root = ET.fromstring(text)
     result = {}
-    for name in (*JOINT_GROUPS['head'], *JOINT_GROUPS['lift'], *GRIPPERS.values()):
+    names = (*JOINT_GROUPS['head'], *JOINT_GROUPS['lift'])
+    if include_grippers:
+        names += tuple(GRIPPERS.values())
+    for name in names:
         joints = root.findall(f"joint[@name='{name}']")
         if len(joints) != 1 or joints[0].find('limit') is None:
             raise ValueError(f'{name}: auxiliary physical URDF limit missing')

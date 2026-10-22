@@ -6,12 +6,14 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="${1:-}"; shift || true
 case "$MODEL" in sg2|sh5) ;; *) echo 'Usage: bash hardware/run_controller.sh sg2|sh5 [--hands] [--check-only [--allow-torque-off]] [--strict-commissioning]'; exit 2;; esac
 HANDS=0
+MANUAL=0
 CHECK=0
 ALLOW_TORQUE_OFF=0
 READINESS_POLICY=driver_managed  # [CHANGED] Normal follower-driver path, no independent torque proof.
 while (( $# )); do
   case "$1" in
     --hands) HANDS=1 ;;
+    --manual-controls) MANUAL=1 ;;
     --check-only) CHECK=1 ;;
     --allow-torque-off) ALLOW_TORQUE_OFF=1 ;;
     --strict-commissioning) READINESS_POLICY=strict_torque ;;
@@ -25,6 +27,9 @@ if (( ALLOW_TORQUE_OFF && ! CHECK )); then
 fi
 if (( HANDS )) && [[ "$MODEL" != sh5 ]]; then
   echo '[ERROR] --hands requires sh5'; exit 2
+fi
+if (( MANUAL )) && { [[ "$MODEL" != sh5 ]] || (( ! HANDS )); }; then
+  echo '[ERROR] --manual-controls requires sh5 --hands'; exit 2
 fi
 source /opt/ros/jazzy/setup.bash
 source /root/ros2_ws/install/setup.bash
@@ -95,6 +100,7 @@ fi
 python3 -m hardware.capture_snapshot --model "$MODEL" --output "$PROFILE/snapshot" --timeout 30 "${SNAPSHOT_ARGS[@]}"
 HAND_ARGS=()
 if (( HANDS )); then HAND_ARGS+=(--hands); fi
+if (( MANUAL )); then HAND_ARGS+=(--manual-controls); fi
 python3 -m hardware.make_profile "${HAND_ARGS[@]}" --model "$MODEL" --output "$PROFILE" \
   --description "$PROFILE/snapshot/robot_description.urdf" --snapshot "$PROFILE/snapshot/joints.json" \
   --readiness-policy "$READINESS_POLICY"
