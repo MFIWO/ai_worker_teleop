@@ -58,8 +58,10 @@ docker exec -it robotis-applications bash /root/gen_cert.sh "$PC_IP"
 컨테이너가 bind mount 중인 저장소 폴더를 실행 중에 이동/이름 변경하지 마세요.
 
 ============================================================
-2. 기존 PC 소스 업데이트
+2. 기존 PC 소스 업데이트 (선택: 기존 설치를 업데이트할 때만)
 ============================================================
+# 새로 clone하여 1번 설치를 끝냈다면 이 단계는 생략하고 3번으로 진행합니다.
+# 코드 변경이 없는 일반 실행에서는 1~3번을 반복하지 않고 4A/4B만 실행합니다.
 # 두 Teleop 터미널을 Ctrl+C로 종료하고 [STOP] 정리가 끝난 뒤 진행.
 cd ~/Downloads/external_repos/ai_worker_teleop_deploy
 BRANCH=$(git branch --show-current)
@@ -127,6 +129,9 @@ bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh pc \
 PC를 먼저 실행해도 Zenoh 7447 포트를 최대 120초 기다립니다.
 [WAIT ZENOH]가 나오면 다른 터미널에서 robot 명령을 실행합니다.
 Loop source: robotis-vr-sh5 / robot type: ffw_sh5_vr
+현재 VR 소스의 기록 대상: 관절 관측/명령, mobile odometry/cmd_vel, 카메라, teleop 상태.
+손가락/손바닥 tactile 압력·접촉·힘 데이터는 현재 구독/기록 채널에 포함되지 않습니다.
+조이스틱의 tact_trigger 버튼 이벤트는 손의 tactile 센서 데이터와 다른 기능입니다.
 녹화 시작은 Loop에서 별도 실행합니다. C는 녹화 시작 키가 아닙니다.
 카메라 없이 joint/status만 보내려면 robot 명령에 --loop-no-camera를 추가합니다.
 
