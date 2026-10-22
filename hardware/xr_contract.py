@@ -270,4 +270,7 @@ def load_profile(path):
         for short in ('l', 'r'):
             if profile['limits'][f'arm_{short}_joint4'][1] > -.7 + 1e-12:
                 raise ValueError('unexpected SH5 arm limit expansion')
+    if profile.get('hand_control') is not None:
+        from hardware.sh5_hands_model import verify_hand_profile
+        verify_hand_profile(profile)
     return profile

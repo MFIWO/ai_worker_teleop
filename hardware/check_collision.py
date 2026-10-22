@@ -13,7 +13,7 @@ import pinocchio as pin
 from hardware.xr_contract import ARM_NAMES
 
 
-def check_initial_pose(urdf, srdf, snapshot, minimum_distance, *, enforce_margin=True):
+def check_initial_pose(urdf, srdf, snapshot, minimum_distance, *, enforce_margin=True, measured_fingers=False):
     """[CHANGED] Distinguish native CBF margin from an extra startup predicate.
 
     In normal operation positive clearance below the CBF target is reported;
@@ -24,8 +24,13 @@ def check_initial_pose(urdf, srdf, snapshot, minimum_distance, *, enforce_margin
     if not np.isfinite(minimum_distance) or minimum_distance <= 0:
         raise ValueError('native collision margin must be finite and positive')
     model = pin.buildModelFromUrdf(str(urdf))
-    if model.nq != model.nv or model.nq != 15:
-        raise ValueError('Cyclo control model must have15 scalar DOFs, no continuous wheels/fingers')
+    expected_dof = 55 if measured_fingers else 15
+    if model.nq != model.nv or model.nq != expected_dof:
+        raise ValueError(f'Cyclo control model must have {expected_dof} scalar DOFs')
+    if measured_fingers:
+        from hardware.sh5_hands_model import CONTROLLER_JOINTS
+        if set(model.names[1:]) != CONTROLLER_JOINTS:
+            raise ValueError('Unexpected joints in measured-finger model')
     data = model.createData()
     geom = pin.buildGeomFromUrdf(model, str(urdf), pin.GeometryType.COLLISION)
     geom.addAllCollisionPairs()

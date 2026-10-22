@@ -500,3 +500,123 @@ Stop both new publishers/controller/gate. Use the original physical follower and
 previous Vuer/Cyclo commands from clean terminals. Original source, URDF, SRDF
 and configuration files were not overwritten. Simulation commands remain in
 the root `XR_*` documents and use domains231/232, never real domain30.
+
+## SH5 hands with the existing hardware arm path (2026-10-22)
+
+`sh5 --hands` adds optical wrist input to `HardwareXRPublisher` and starts the
+unmodified installed ROBOTIS `retargeting_teleop`. It does not use the earlier
+simulation publisher or the legacy `controller_pc.sh` arm path. The robot build
+adds measured finger positions to collision FK and fixes finger QP velocities at
+zero: only the native hand retargeter commands fingers. Other passive joints
+remain monitored at the captured posture. Existing SH5 arm limits still apply
+(arm speed up to 0.35 rad/s and joint4 upper bound -0.7 rad); these differ from
+SG2's physical-URDF limits. Arm mapping, capture, resume and Cartesian filtering
+remain inherited from the existing hardware publisher.
+
+Extra hand-span heuristics, duplicate short-gap disarm, and hand-node-count
+checks were removed. Finite/rigid input decoding, original arm guards and native
+retarget joint limits remain. Hand points publish while the existing arm session
+is ACTIVE and input/feedback is fresh. There is no new hand command relay or
+extra hand trajectory slew limiter. Collision FK uses current measured fingers;
+this is not a predictive finger collision filter. Missing hand input sends no
+new finger targets; it does not actively cancel the follower's last target.
+
+This integration has not been built or tested by the coding agent at the user's
+request. Source wiring is complete; actual Quest/hardware operation is unverified.
+
+### Publish the local change first
+
+Run in the changed checkout on the development PC:
+
+```bash
+cd ~/Downloads/external_repos/ai_worker_teleop
+git add run_xr_hardware_pc.sh hardware \
+  robotis_vuer/robotis_vuer/sh5_optical_hand.py \
+  robotis_vuer/robotis_vuer/vr_publisher_sh5_hands_hardware.py
+git commit -m "Integrate native SH5 hands with hardware arm teleop"
+git push origin robotis-applications
+```
+
+### PC installation
+
+In the updated `robotis-applications` branch checkout on the mini PC host:
+
+```bash
+cd ~/Downloads/external_repos/ai_worker_teleop
+git pull --ff-only origin robotis-applications
+bash hardware/install_pc.sh
+```
+
+This copies the sources used by the Python launcher into the existing PC
+container; a PC colcon rebuild is not required. Existing certificates remain.
+The container needs its existing ROS Jazzy, Vuer, numpy/scipy and
+`robotis_interfaces` installation, as used by the working SH5 hand simulation.
+
+### Robot installation and build
+
+After pushing, on the robot host (first checkout):
+
+```bash
+git clone --branch robotis-applications --single-branch \
+  https://github.com/MFIWO/ai_worker_teleop.git ~/ai_worker_teleop_sh5
+cd ~/ai_worker_teleop_sh5
+bash hardware/install_robot.sh
+```
+
+For an existing checkout use `git pull --ff-only origin robotis-applications`
+in that directory, then run the installer again. Build inside the existing
+`ai_worker` container; this does not launch the controller or move the robot:
+
+```bash
+docker exec -it ai_worker bash -lc '
+  set -e
+  source /opt/ros/jazzy/setup.bash
+  source /root/ros2_ws/install/setup.bash
+  export PYTHONPATH=/opt/venv/lib/python3.12/site-packages:${PYTHONPATH:-}
+  cd /workspace/ai_worker_xr
+  python3 -m hardware.build_sh5_hands
+'
+```
+
+This requires the existing Cyclo C++ source and build dependencies, installed
+`cyclo_motion_controller_ros_py` with `retargeting_teleop`, its `retargeting`
+Python library and hand models, and the actual SH5 follower/description package.
+A Git clone of this PC/helper repository does not install those robot packages.
+The separate executable is built under `/workspace/ai_worker_xr_sh5_hands`;
+it does not overwrite the verified SG2 startup executable. If the installed
+Cyclo source has changed, the build reports the differing source anchor rather
+than modifying the installed source blindly. Use `--rebuild` after source updates.
+
+### Each run: variable IP addresses
+
+Start the actual SH5 follower using its established bringup and ready pose first.
+This command uses `--arm`, not SG2's `--start`: it does not move to a ready pose.
+Both elbows must already be within the existing SH5 model limits (the usual
+ready angle is approximately -1.57 rad). Stop earlier teleop/hand-test publishers.
+
+PC terminal:
+
+```bash
+PC_IP=192.168.5.101       # replace for this network
+ROBOT_IP=192.168.5.102    # replace for this network
+docker exec -it robotis-applications bash \
+  /root/ros2_ws/src/robotis_applications/run_xr_hardware_pc.sh \
+  sh5 --arm --hands --server-ip "$PC_IP" --robot-ip "$ROBOT_IP"
+```
+
+Second PC terminal (SSH to the robot):
+
+```bash
+ROBOT_IP=192.168.5.102    # replace for this network
+ssh -t "robotis@$ROBOT_IP" \
+  'docker exec -it ai_worker bash /workspace/ai_worker_xr/hardware/run_controller.sh sh5 --hands'
+```
+
+Quest: `https://<PC_IP>:8012?ws=wss://<PC_IP>:8012`. Use bare-hand tracking;
+release gestures first, then hold one hand's pinch plus the other hand's squeeze
+for 3 seconds to start. Release before repeating. If the existing arm startup
+reports `WAIT_START`, repeat the start gesture after alignment. While ACTIVE,
+the same gesture stops input. PC and robot use the existing domain 30/Zenoh path.
+IP values are command arguments, not baked into source. If the PC IP changes,
+its Vuer certificate must include the new IP; use the existing certificate setup
+before launching. The `--server-ip` check reports a mismatch before starting Vuer.

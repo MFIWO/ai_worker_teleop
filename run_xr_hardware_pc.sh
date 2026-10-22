@@ -4,7 +4,8 @@
 set -eo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
-  echo 'Usage: bash run_xr_hardware_pc.sh sg2|sh5 [--start | --arm] [--ready-pose | --ready-only] [--server-ip PC_IPv4] [--robot-ip ROBOT_IP_OR_HOSTNAME] [--strict-commissioning]'
+  echo 'Usage: bash run_xr_hardware_pc.sh sg2|sh5 [--start | --arm] [--hands] [--ready-pose | --ready-only] [--server-ip PC_IPv4] [--robot-ip ROBOT_IP_OR_HOSTNAME] [--strict-commissioning]'
+  echo '  --hands: SH5 bare wrists + native hand retarget; use sh5 --arm --hands.'
   echo '  --start: SG2 only; existing ready-pose move, then armed Vuer (manual X+A still required).'
   echo '  --server-ip: PC address used by Quest; validate its TLS certificate before any ready move.'
   echo '  --robot-ip: robot Zenoh router address; this is NOT the Vuer certificate address.'
@@ -14,6 +15,7 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then usage; exit 0; fi
 MODEL="${1:-}"; shift || true
 case "$MODEL" in sg2|sh5) ;; *) usage; exit 2;; esac
 export AI_WORKER_XR_ALLOW_ARM=0
+HANDS=0
 PREPARE_READY=0
 READY_ONLY=0       # [ADDED] Move to measured ready pose, exit BEFORE starting Vuer.
 ROBOT_ROUTER=""     # [ADDED] Explicit robot Zenoh router; no manual shell override needed.
@@ -23,6 +25,7 @@ while (( $# )); do
   case "$1" in
     --start) PREPARE_READY=1; export AI_WORKER_XR_ALLOW_ARM=1 ;; # [CHANGED] Explicit motion opt-in.
     --arm) export AI_WORKER_XR_ALLOW_ARM=1 ;;
+    --hands) HANDS=1 ;;
     --ready-pose) PREPARE_READY=1 ;;
     --ready-only) READY_ONLY=1; PREPARE_READY=1 ;;
     --strict-commissioning) READINESS_POLICY=strict_torque ;;
@@ -45,6 +48,9 @@ while (( $# )); do
   esac
   shift
 done
+if (( HANDS )) && [[ "$MODEL" != sh5 ]]; then
+  echo "[ERROR] --hands requires sh5"; exit 2
+fi
 if (( PREPARE_READY )) && [[ "$MODEL" != sg2 ]]; then
   echo '[ERROR] --ready-pose is SG2-only; no verified SH5 ready-pose mover'; exit 2
 fi
@@ -131,6 +137,13 @@ if (( PREPARE_READY )); then
   echo '[NEXT: QUEST] Wait for controller/model feedback, then press X+A. No automatic VR activation.'
 fi
 
-echo "[HARDWARE $MODEL] readiness=$READINESS_POLICY; manual X+A required. Y+B stops all. Cartesian filter=.3m/s/1.5rad/s; URDF joint limits."
-echo "[HARDWARE] RMW=$RMW_IMPLEMENTATION. SG2 sticks/trigger via gate; X+A resumes with measured anchors; receipt-time freshness. Do not run legacy Vuer beside this process."
-exec python3 -m robotis_vuer.vr_publisher_ai_worker_hardware --ros-args -r __node:=ai_worker_xr_hardware
+echo "[HARDWARE $MODEL] readiness=$READINESS_POLICY; RMW=$RMW_IMPLEMENTATION; Cartesian filter=.3m/s/1.5rad/s; URDF joint limits."
+if (( ! HANDS )); then
+  echo '[HARDWARE] Manual X+A starts/resumes; Y+B stops. SG2 sticks/trigger via gate.'
+fi
+PUBLISHER=robotis_vuer.vr_publisher_ai_worker_hardware
+if (( HANDS )); then
+  PUBLISHER=robotis_vuer.vr_publisher_sh5_hands_hardware
+  echo '[SH5 HANDS] Bare wrists + SH5 fingers. Pinch + opposite squeeze for 3s starts/stops.'
+fi
+exec python3 -m "$PUBLISHER" --ros-args -r __node:=ai_worker_xr_hardware

@@ -4,12 +4,14 @@
 set -eo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="${1:-}"; shift || true
-case "$MODEL" in sg2|sh5) ;; *) echo 'Usage: bash hardware/run_controller.sh sg2|sh5 [--check-only [--allow-torque-off]] [--strict-commissioning]'; exit 2;; esac
+case "$MODEL" in sg2|sh5) ;; *) echo 'Usage: bash hardware/run_controller.sh sg2|sh5 [--hands] [--check-only [--allow-torque-off]] [--strict-commissioning]'; exit 2;; esac
+HANDS=0
 CHECK=0
 ALLOW_TORQUE_OFF=0
 READINESS_POLICY=driver_managed  # [CHANGED] Normal follower-driver path, no independent torque proof.
 while (( $# )); do
   case "$1" in
+    --hands) HANDS=1 ;;
     --check-only) CHECK=1 ;;
     --allow-torque-off) ALLOW_TORQUE_OFF=1 ;;
     --strict-commissioning) READINESS_POLICY=strict_torque ;;
@@ -20,6 +22,9 @@ done
 if (( ALLOW_TORQUE_OFF && ! CHECK )); then
   echo '[ERROR] --allow-torque-off is a legacy passive-only option; use --check-only'
   exit 2
+fi
+if (( HANDS )) && [[ "$MODEL" != sh5 ]]; then
+  echo '[ERROR] --hands requires sh5'; exit 2
 fi
 source /opt/ros/jazzy/setup.bash
 source /root/ros2_ws/install/setup.bash
@@ -38,13 +43,19 @@ required=('numpy','scipy','yaml','pinocchio','rclpy','dynamixel_interfaces')
 missing=[name for name in required if importlib.util.find_spec(name) is None]
 if missing:raise SystemExit('[ERROR] Missing robot Python dependencies: '+', '.join(missing))
 PY
+BUILDER=build_startup_timing.py
+BUILD_ROOT=/workspace/ai_worker_xr_startup_steady
+if (( HANDS )); then
+  BUILDER=build_sh5_hands.py
+  BUILD_ROOT=/workspace/ai_worker_xr_sh5_hands
+fi
 if (( ! CHECK )); then
-  python3 -B "$HERE/hardware/build_startup_timing.py" --verify-only || {
-    echo "[ERROR] Build startup node before operating: python3 -B $HERE/hardware/build_startup_timing.py"
+  python3 -B "$HERE/hardware/$BUILDER" --verify-only || {
+    echo "[ERROR] Build startup node before operating: python3 -B $HERE/hardware/$BUILDER"
     exit 1
   }
 fi
-BIN=/workspace/ai_worker_xr_startup_steady/build/cyclo_motion_controller_ros/vr_controller_node
+BIN="$BUILD_ROOT"/build/cyclo_motion_controller_ros/vr_controller_node
 if (( CHECK )); then
   BIN="$(ros2 pkg prefix cyclo_motion_controller_ros)/lib/cyclo_motion_controller_ros/vr_controller_node"
 fi
@@ -82,7 +93,9 @@ if (( ALLOW_TORQUE_OFF )); then
 fi
 # [CHANGED] Allow up to 30s for Zenoh discovery + measured-state stabilization.
 python3 -m hardware.capture_snapshot --model "$MODEL" --output "$PROFILE/snapshot" --timeout 30 "${SNAPSHOT_ARGS[@]}"
-python3 -m hardware.make_profile --model "$MODEL" --output "$PROFILE" \
+HAND_ARGS=()
+if (( HANDS )); then HAND_ARGS+=(--hands); fi
+python3 -m hardware.make_profile "${HAND_ARGS[@]}" --model "$MODEL" --output "$PROFILE" \
   --description "$PROFILE/snapshot/robot_description.urdf" --snapshot "$PROFILE/snapshot/joints.json" \
   --readiness-policy "$READINESS_POLICY"
 export AI_WORKER_XR_PROFILE="$PROFILE/profile.json"
