@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 
 
 def ipv4(value):
@@ -38,18 +39,19 @@ def parser():
 
 
 def command(args,interactive):
-    terminal='-it' if interactive else '-i'
+    # stdin carries a lease; TTY detachment alone does not stop docker exec.
+    terminal='-i'
     if args.side=='pc':
         return ['docker','exec',terminal,'robotis-applications','bash',
                 '/root/ros2_ws/src/robotis_applications/hardware/run_pc_session.sh',
-                '--pc-ip',args.pc_ip,'--robot-ip',args.robot_ip,'--loop',args.loop,'--input',args.input]
+                '--pc-ip',args.pc_ip,'--robot-ip',args.robot_ip,'--loop',args.loop,'--input',args.input,'--host-lease']
     inner=['docker','exec',terminal,'ai_worker','bash',
            '/workspace/ai_worker_xr/hardware/run_robot_session.sh',
-           '--pc-ip',args.pc_ip,'--robot-ip',args.robot_ip,'--loop',args.loop,'--input',args.input]
+           '--pc-ip',args.pc_ip,'--robot-ip',args.robot_ip,'--loop',args.loop,'--input',args.input,'--host-lease']
     if args.bringup:inner.append('--bringup')
     if args.ready_pose:inner.append('--ready-pose')
     if args.loop_no_camera:inner.append('--loop-no-camera')
-    return ['ssh',*(['-t'] if interactive else []),f'robotis@{args.robot_ip}',shlex.join(inner)]
+    return ['ssh','-T','-o','ServerAliveInterval=2','-o','ServerAliveCountMax=2',f'robotis@{args.robot_ip}',shlex.join(inner)]
 
 
 def main():
@@ -70,15 +72,34 @@ def main():
         if member and shutil.which('sg'):cmd=['sg','docker','-c',shlex.join(cmd)]
     # Keep the SSH/docker client alive while the container coordinator handles
     # the terminal's Ctrl+C and shuts down its owned ROS launch trees.
-    process=subprocess.Popen(cmd)
-    def interrupt(*_):
+    process=subprocess.Popen(cmd,stdin=subprocess.PIPE,start_new_session=True)
+    stopping=False
+    stop_signal=None
+    def interrupt(sig,*_):
+        nonlocal stopping,stop_signal
+        stopping=True
+        stop_signal=sig
         if process.poll() is None:
-            print('[STOP] Waiting for container session cleanup; keep this terminal open.',flush=True)
-    signal.signal(signal.SIGINT,interrupt)
+            try:print('[STOP] Waiting for container session cleanup; keep this terminal open.',flush=True)
+            except OSError:pass
+    saved={sig:signal.signal(sig,interrupt) for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)}
     try:
+        while process.poll() is None and not stopping:
+            try:
+                process.stdin.write(b'alive\n');process.stdin.flush()
+            except (BrokenPipeError,OSError):break
+            time.sleep(.25)
+        if stop_signal==signal.SIGINT:
+            try:process.stdin.write(b'stop\n');process.stdin.flush()
+            except (BrokenPipeError,OSError):pass
+        try:process.stdin.close()
+        except (BrokenPipeError,OSError):pass
         raise SystemExit(process.wait())
     finally:
-        signal.signal(signal.SIGINT,signal.SIG_DFL)
+        if not process.stdin.closed:
+            try:process.stdin.close()
+            except (BrokenPipeError,OSError):pass
+        for sig,handler in saved.items():signal.signal(sig,handler)
 
 
 if __name__=='__main__':main()
