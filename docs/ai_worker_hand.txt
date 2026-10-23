@@ -1,5 +1,5 @@
 AI Worker SH5 팔·손 통합 Teleop / VR·Loop 적용 안내
-갱신: 2026-10-22 (KST)
+갱신: 2026-10-23 (KST)
 
 ============================================================
 0. 브랜치 선택과 기본 조건
@@ -12,8 +12,8 @@ Loop까지 사용할 PC는 main을 받으면 팔·손 Teleop 코드도 함께 �
 기존 main의 SG2 backport/Loop 참고 코드는 기록으로 보존됩니다.
 
 현재 네트워크 예시:
-  PC_IP=192.168.5.2
-  ROBOT_IP=192.168.5.101
+  PC_IP=192.168.6.2
+  ROBOT_IP=192.168.6.50
   SSH 별칭=ffw-SNPR48A1114.local
 다른 PC/로봇에서는 실제 주소로 바꾸세요. PC_IP는 Quest가 접속할 PC 주소입니다.
 
@@ -51,7 +51,7 @@ bash docker/container.sh start
 bash hardware/install_pc.sh
 
 # 실제 Quest 접속 PC 주소로 인증서 생성. 새 CA가 생성되면 Quest에서 신뢰 설정 필요:
-PC_IP=192.168.5.2
+PC_IP=192.168.6.2
 docker exec -it robotis-applications bash /root/gen_cert.sh "$PC_IP"
 
 주의: 이미 있는 clone에는 git clone을 반복하지 말고 다음의 업데이트 절차를 사용합니다.
@@ -71,7 +71,7 @@ bash hardware/install_pc.sh
 ============================================================
 3. PC에서 로봇으로 배포 / 설치 / 빌드
 ============================================================
-ROBOT_IP=192.168.5.101
+ROBOT_IP=192.168.6.50
 cd ~/Downloads/external_repos/ai_worker_teleop_deploy
 
 rsync -av \
@@ -101,14 +101,14 @@ ROBOT_BUILD
 ============================================================
 # 터미널 1: robot session (--bringup은 없는 router/follower를 시작)
 bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh robot \
-  --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop off --bringup
+  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop off --bringup
 
 # 터미널 2: PC Vuer
 bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh pc \
-  --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop off
+  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop off
 
 Quest 접속:
-https://192.168.5.2:8012?ws=wss://192.168.5.2:8012
+https://192.168.6.2:8012?ws=wss://192.168.6.2:8012
 양손·몸 추적을 유지하고 한 손 pinch + 반대 손 squeeze 3초로 시작/중단합니다.
 --loop off에서는 Loop 키보드 브리지를 실행하지 않으므로 C 키 조작을 사용하지 않습니다.
 SH5 follower가 새로 시작되면 손/팔/목/lift/steering의 기존 초기화 동작이 실행됩니다.
@@ -120,11 +120,11 @@ PC에서 Loop 앱을 먼저 엽니다. 물리 leader는 종료한 상태로 진�
 
 # 터미널 1: robot session
 bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh robot \
-  --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop vr --bringup
+  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop vr --bringup
 
 # 터미널 2: PC Vuer + Loop 키보드
 bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh pc \
-  --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop vr
+  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop vr
 
 PC를 먼저 실행해도 Zenoh 7447 포트를 최대 120초 기다립니다.
 [WAIT ZENOH]가 나오면 다른 터미널에서 robot 명령을 실행합니다.
@@ -166,8 +166,15 @@ C HOLD 중에도 같은 에피소드의 영상/토픽/데이터는 계속 기록
 학습용으로 제외할 때는 action_valid/paused를 기준으로 모든 스트림을 함께 처리합니다.
 
 베이스 이동 시 팔은 HOLD됩니다. 이동 키를 놓아도 키보드는 계속 사용할 수 있습니다.
-이동 후 C를 누르면 충돌 프로필 갱신을 시작합니다. 이때 잠시 키보드 동작이 차단됩니다.
-[BASE RECAPTURED] 후 키를 놓고 C를 다시 눌러 팔을 재개합니다.
+이동 후 키를 놓고 C를 한 번 누르면 현재 측정 자세로 재앵커하여 재개합니다.
+C에서는 새 스냅샷/충돌 테스트/모델 재생성/컨트롤러 재시작을 하지 않습니다.
+바퀴 6관절도 실시간 측정 모델에 포함하여 베이스 이동 후 프로필 교체를 없앴습니다.
+정상 추적·피드백 상태에서 C→READY 약 0.1초를 목표로 설정했습니다.
+별도 settle/활성화 대기=0, native ramp=0.03초, 양팔 출력 확인 후 추적을 시작합니다.
+최초 세션 실행 때의 모델 준비는 한 번 필요합니다. 실제 모터/네트워크 지연까지 0.1초를 보장하는 것은 아닙니다.
+[BASE REANCHORED] 로그가 나오며, 이동 키를 놓은 뒤 disarm 응답이 신선해야 재개합니다.
+이 변경은 로봇 helper 설치와 별도 SH5 바이너리 --rebuild가 한 번 필요합니다.
+기존 프로필 조회가 끊긴 경우에도 3초 후 재조회하여 HARDWARE_PROFILE_REQUIRED 고착을 방지합니다.
 [LOOP FOCUS] inactive면 Loop 창을 클릭하고 키를 놓은 뒤 다시 누르세요.
 [LOOP KEYS BLOCKED]에는 프로필/피드백/fault 등 차단 이유가 출력됩니다.
 
@@ -183,7 +190,7 @@ launch 부모가 먼저 종료된 경우에도 고유 소유 표식이 있는 �
 이전 버전이 남긴 bringup은 새 버전의 소유 표식이 없으므로 한 번 별도로 정리해야 합니다.
 
 # 로봇 컨테이너의 PID/실행 상태 확인 (호스트 PID와 혼동하지 않기):
-ROBOT_IP=192.168.5.101
+ROBOT_IP=192.168.6.50
 ssh "robotis@$ROBOT_IP" 'docker exec ai_worker ps -eo pid,args'
 
 # 이전 launch를 정리할 때: 위 목록의 정확한 SH5 ros2 launch PID를 사용

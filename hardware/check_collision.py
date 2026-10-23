@@ -17,8 +17,10 @@ class AuxiliaryCollisionGuard:
     """Cached FK/distance check for keyboard head/lift targets at measured arms."""
     def __init__(self, profile):
         self.model = pin.buildModelFromUrdf(profile['urdf'])
-        if self.model.nq != self.model.nv or self.model.nq != 57:
-            raise ValueError('Manual SH5 controls require the 57 scalar-joint model')
+        self.live_wheels = bool(profile.get('live_wheel_feedback'))
+        expected_dof = 63 if self.live_wheels else 57
+        if self.model.nq != self.model.nv or self.model.nq != expected_dof:
+            raise ValueError(f'Manual SH5 controls require the {expected_dof} scalar-joint model')
         self.data = self.model.createData()
         self.geom = pin.buildGeomFromUrdf(self.model, profile['urdf'], pin.GeometryType.COLLISION)
         self.geom.addAllCollisionPairs()
@@ -50,8 +52,10 @@ class AuxiliaryCollisionGuard:
         positions=dict(measured, **targets)
         moving={self.model.getJointId(n) for n,v in targets.items() if abs(v-measured[n])>1e-12}
         q=pin.neutral(self.model)
+        from hardware.sh5_hands_model import scalar_sensor_position
         for i in range(1,self.model.njoints):
-            q[self.model.joints[i].idx_q]=positions[self.model.names[i]]
+            name = self.model.names[i]
+            q[self.model.joints[i].idx_q]=scalar_sensor_position(name,positions[name]) if self.live_wheels else positions[name]
         if not np.isfinite(q).all():raise ValueError('Nonfinite manual collision state')
         pin.computeDistances(self.model,self.data,self.geom,self.geom_data,q)
         candidates=[]
@@ -68,7 +72,7 @@ class AuxiliaryCollisionGuard:
                     raise ValueError('Manual head/lift target has original-mesh contact/penetration; hold and inspect')
 
 
-def check_initial_pose(urdf, srdf, snapshot, minimum_distance, *, enforce_margin=True, measured_fingers=False, measured_head=False):
+def check_initial_pose(urdf, srdf, snapshot, minimum_distance, *, enforce_margin=True, measured_fingers=False, measured_head=False, measured_wheels=False):
     """[CHANGED] Distinguish native CBF margin from an extra startup predicate.
 
     In normal operation positive clearance below the CBF target is reported;
@@ -80,11 +84,13 @@ def check_initial_pose(urdf, srdf, snapshot, minimum_distance, *, enforce_margin
         raise ValueError('native collision margin must be finite and positive')
     model = pin.buildModelFromUrdf(str(urdf))
     expected_dof = (57 if measured_head else 55) if measured_fingers else 15
+    if measured_wheels:expected_dof += 6
     if model.nq != model.nv or model.nq != expected_dof:
         raise ValueError(f'Cyclo control model must have {expected_dof} scalar DOFs')
     if measured_fingers:
-        from hardware.sh5_hands_model import CONTROLLER_JOINTS, HEAD_JOINTS
+        from hardware.sh5_hands_model import CONTROLLER_JOINTS, HEAD_JOINTS, WHEEL_JOINTS
         expected = CONTROLLER_JOINTS | HEAD_JOINTS if measured_head else CONTROLLER_JOINTS
+        if measured_wheels:expected |= WHEEL_JOINTS
         if set(model.names[1:]) != expected:
             raise ValueError('Unexpected joints in measured-finger model')
     data = model.createData()
@@ -97,7 +103,11 @@ def check_initial_pose(urdf, srdf, snapshot, minimum_distance, *, enforce_margin
         name = model.names[joint_id]
         if name not in snapshot:
             raise ValueError('missing measured model joint: '+name)
-        q[model.joints[joint_id].idx_q] = float(snapshot[name])
+        value = float(snapshot[name])
+        if measured_wheels:
+            from hardware.sh5_hands_model import scalar_sensor_position
+            value = scalar_sensor_position(name,value)
+        q[model.joints[joint_id].idx_q] = value
     if not np.isfinite(q).all():
         raise ValueError('nonfinite measured model joint')
     pin.computeDistances(model, data, geom, geom_data, q)

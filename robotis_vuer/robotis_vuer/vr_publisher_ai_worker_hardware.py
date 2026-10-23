@@ -102,6 +102,7 @@ class HardwareXRPublisher(XROverheadPublisher):
         self._gate_rx = -1e9
         self._gate_profile_rx = -1e9
         self._gate_future = None
+        self._profile_request_started = {}
         self._controller_values = None
         self._startup_timing = None
         self._intent_sequence = 0
@@ -185,9 +186,12 @@ class HardwareXRPublisher(XROverheadPublisher):
                 return
             if instance == self._gate_instance and sequence <= self._gate_status_sequence:
                 return
-            if self._gate_instance is not None and instance != self._gate_instance:
+            changed_instance = instance != self._gate_instance
+            if self._gate_instance is not None and changed_instance:
                 self._retired_gate_instances.add(self._gate_instance)
             self._gate_instance, self._gate_status_sequence = instance, sequence
+            if changed_instance:
+                self._invalidate_profile_requests()
             self._gate_state, self._gate_rx = data, time.monotonic()
             readiness = (bool(data.get('description_ok') and data.get('measured_fresh') and
                               data.get('motor_healthy') and self._profile_verified and not data.get('fault')),
@@ -287,19 +291,45 @@ class HardwareXRPublisher(XROverheadPublisher):
     def _extra_intent(self, now):
         return {}
 
+    def _invalidate_profile_requests(self):
+        # Old servers can disappear without completing their service futures.
+        # Retire requests before cancellation callbacks can touch the new state.
+        for name in ('_gate_future','_profile_future'):
+            future = getattr(self,name,None)
+            setattr(self,name,None)
+            if future is not None and not future.done():future.cancel()
+        self._profile_request_started.clear()
+        self._hardware_manifest = None
+        self._profile_verified = False
+        self._gate_profile_rx = self._profile_rx = -1e9
+
     def _query_profile(self):
         if not hasattr(self, '_gate_client'):
             return
-        if (self._gate_future is None or self._gate_future.done()) and self._gate_client.services_are_ready():
-            self._gate_future = self._gate_client.get_parameters(['profile_json'])
-            self._gate_future.add_done_callback(self._gate_profile)
-        if (self._profile_future is None or self._profile_future.done()) and self._profile_client.services_are_ready():
-            self._profile_future = self._profile_client.get_parameters([
+        requests = (
+            ('_gate_future',self._gate_client,['profile_json'],self._gate_profile),
+            ('_profile_future',self._profile_client,[
                 'urdf_path', 'srdf_path', 'weight_elbow_position', 'weight_position',
                 'weight_orientation', 'r_gripper_name', 'l_gripper_name',
                 'right_traj_topic', 'left_traj_topic',
-                'activation_delay_seconds', 'startup_ramp_seconds'])
-            self._profile_future.add_done_callback(self._profile_result)
+                'activation_delay_seconds', 'startup_ramp_seconds'],self._profile_result))
+        now = time.monotonic()
+        for name,client,parameters,handler in requests:
+            future = getattr(self,name,None)
+            if future is not None and not future.done():
+                if now-self._profile_request_started.get(name,now) < 3.:continue
+                setattr(self,name,None)
+                future.cancel()
+                self.get_logger().warning('[PROFILE QUERY RETRY] No reply within 3s; querying current controller again')
+            if not client.services_are_ready():continue
+            future = client.get_parameters(parameters)
+            setattr(self,name,future)
+            self._profile_request_started[name] = now
+            instance = self._gate_instance
+            def received(result, name=name, instance=instance, handler=handler):
+                if result is getattr(self,name,None) and instance == self._gate_instance and not result.cancelled():
+                    handler(result)
+            future.add_done_callback(received)
 
     def _gate_profile(self, future):
         try:

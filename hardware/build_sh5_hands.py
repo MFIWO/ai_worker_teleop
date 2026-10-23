@@ -80,27 +80,34 @@ def patched_source(text):
     anchor = '  left_arm_joints_.clear();'
     text = replace_once(text, anchor, '''  int measured_fingers = 0;
   int measured_head = 0;
+  int measured_wheels = 0;
   for (size_t i = 0; i < model_joint_names_.size(); ++i) {
     const bool finger = model_joint_names_[i].rfind("finger_", 0) == 0;
     const bool head = model_joint_names_[i] == "head_joint1" || model_joint_names_[i] == "head_joint2";
-    if (finger || head) {
+    const bool wheel = model_joint_names_[i] == "left_wheel_drive" || model_joint_names_[i] == "right_wheel_drive" ||
+      model_joint_names_[i] == "rear_wheel_drive" || model_joint_names_[i] == "left_wheel_steer" ||
+      model_joint_names_[i] == "right_wheel_steer" || model_joint_names_[i] == "rear_wheel_steer";
+    if (finger || head || wheel) {
       if (!kinematics_solver_->setJointVelocityBoundsByIndex(static_cast<int>(i), 0.0, 0.0)) {
         throw std::runtime_error("Cannot exclude SH5 fingers from arm QP outputs");
       }
       if (finger) ++measured_fingers;
       if (head) ++measured_head;
+      if (wheel) ++measured_wheels;
     }
   }
   if (measured_fingers != 40 || (measured_head != 0 && measured_head != 2) ||
-      model_joint_names_.size() != static_cast<size_t>(55 + measured_head)) {
-    throw std::runtime_error("SH5 requires 14 arms + lift + 40 fingers and optional 2 measured head joints");
+      (measured_wheels != 0 && measured_wheels != 6) || (measured_wheels && measured_head != 2) ||
+      model_joint_names_.size() != static_cast<size_t>(55 + measured_head + measured_wheels)) {
+    throw std::runtime_error("SH5 requires 14 arms + lift + 40 fingers, optional 2 head and 6 measured wheel joints");
   }
 ''' + anchor)
     anchor = '    // If lift is commanded by another node, use measured lift state for'
     text = replace_once(text, anchor, '''    // Hand retargeting owns fingers. Use their actual positions for collision FK.
     for (size_t i = 0; i < model_joint_names_.size(); ++i) {
       if (model_joint_names_[i].rfind("finger_", 0) == 0 ||
-          model_joint_names_[i] == "head_joint1" || model_joint_names_[i] == "head_joint2") {
+          model_joint_names_[i] == "head_joint1" || model_joint_names_[i] == "head_joint2" ||
+          model_joint_names_[i].find("_wheel_") != std::string::npos) {
         q_feedback[static_cast<int>(i)] = q_[static_cast<int>(i)];
       }
     }
@@ -152,6 +159,11 @@ def main():
     write_changed(destination / CPP, source)
     write_changed(destination / HEADER, header)
     core = prepare_sparse_core(destination)
+    # Robot wall time can lag existing object mtimes. Explicit rebuild must
+    # compile the changed source even after a backward clock correction.
+    build_dir = ROOT / 'build/cyclo_motion_controller_ros'
+    if args.rebuild and (build_dir / 'CMakeCache.txt').exists():
+        subprocess.run(['cmake','--build',str(build_dir),'--target','clean'],check=True)
     subprocess.run(['colcon', 'build', '--packages-select', 'cyclo_motion_controller_ros',
                     '--cmake-target', 'vr_controller_node', '--executor', 'sequential',
                     '--cmake-args', '-DCMAKE_BUILD_TYPE=Release', '-DBUILD_TESTING=OFF'],

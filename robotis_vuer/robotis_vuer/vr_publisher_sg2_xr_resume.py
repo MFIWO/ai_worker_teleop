@@ -35,6 +35,7 @@ class XRResumePublisher(XRDeltaPublisher):
     WARMUP_HOLD_SECONDS = 8.0
     STOP_SETTLE_SECONDS = 0.50
     STILL_WINDOW_SECONDS = 0.30
+    POST_STOP_POSE_SECONDS = 0.15
 
     def __init__(self, start_server=True):
         self._resume_ready = False
@@ -155,7 +156,7 @@ class XRResumePublisher(XRDeltaPublisher):
         now_ros = self.get_clock().now().nanoseconds * 1e-9
         for side in SIDES:
             pose, receipt, source = self._robot_poses.get(side, (None, -1e9, -1e9))
-            if (pose is None or now - receipt > self.FEEDBACK_MAX_AGE or receipt < self._stopped_at + 0.15
+            if (pose is None or now - receipt > self.FEEDBACK_MAX_AGE or receipt < self._stopped_at + self.POST_STOP_POSE_SECONDS
                     or (not self.RECEIPT_TIME_ONLY and
                         (source < self._stopped_ros + 0.10 or not -0.1 <= now_ros - source <= self.FEEDBACK_MAX_AGE))):
                 raise ValueError(f'missing inactive Cyclo {side} gripper pose')
