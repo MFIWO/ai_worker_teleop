@@ -56,8 +56,11 @@ def targets(poses,controls):
         # Grip has priority: thumb/index/middle pinch, ring/little stay open.
         mode = 'pinch' if item['grip'] > .05 else item.get('pose','grasp')
         depth = item['grip'] if mode == 'pinch' else item['trigger']
+        # Mode 2: selecting angled grip establishes the C-shaped rest pose.
+        # Trigger travel closes continuously from that pose, including release.
+        baseline = poses[side]['angled_prepare'] if mode=='angled_grip' else poses[side]['open']
         result.update({name: opened+depth*(closed-opened)
-                       for name,opened,closed in zip(FINGER_NAMES[side],poses[side]['open'],poses[side][mode])})
+                       for name,opened,closed in zip(FINGER_NAMES[side],baseline,poses[side][mode])})
     return result
 
 
@@ -83,6 +86,7 @@ class SH5HandOutput:
         self.controls = None
         self.rx = -math.inf
         self.previous = {}
+        self.filtered = {}
         self.active = False
         self.last_output = 0.
 
@@ -127,31 +131,27 @@ class SH5HandOutput:
             self.publish(measured)
         self.active = False
         self.previous.clear()
+        self.filtered.clear()
         self.preparing.clear()
 
     def prepare_targets(self,desired,measured,now):
         for side,item in self.controls.items():
             pose = item.get('pose')
-            if (pose not in ('angled_grip','thumb_out_grip') or item['trigger']<=.02 or item['grip']>.05):
+            if pose!='thumb_out_grip' or item['trigger']<=.02 or item['grip']>.05:
                 self.preparing.pop(side,None)
                 continue
             names=FINGER_NAMES[side]
-            if pose=='thumb_out_grip':desired.update(zip(names[:4],self.poses[side][pose][:4]))
+            desired.update(zip(names[:4],self.poses[side][pose][:4]))
             if side not in self.preparing or self.preparing[side]['pose']!=pose:
                 self.preparing[side]={'pose':pose,'start':now,'done':False,
                     'held':{name:measured[name] for name in names}}
             state=self.preparing[side]
             if state['done']:continue
-            if pose=='thumb_out_grip':
-                # Place the thumb outside first, keeping other fingers where
-                # they were. Full thumb preparation also applies at low depth.
-                prep=dict(state['held'])
-                prep.update(zip(names[:4],self.poses[side][pose][:4]))
-                checked=names[:4]
-            else:
-                prep={n:a+item['trigger']*(b-a) for n,a,b in
-                      zip(names,self.poses[side]['open'],self.poses[side]['angled_prepare'])}
-                checked=names
+            # Place the thumb outside first, keeping other fingers where
+            # they were. Full thumb preparation also applies at low depth.
+            prep=dict(state['held'])
+            prep.update(zip(names[:4],self.poses[side][pose][:4]))
+            checked=names[:4]
             reached=all(abs(measured[n]-prep[n])<.10 for n in checked)
             if reached and now-state['start']>=.12:
                 state['done']=True
@@ -174,6 +174,13 @@ class SH5HandOutput:
             raise ValueError('controller hands require all 40 fresh measured finger joints')
         if self.mode=='controllers' and self.hand_mode==2:
             desired=self.prepare_targets(desired,measured,now)
+            # Smooth controller sampling and preparation transitions without
+            # bypassing physical velocity limits or stale-input HOLD below.
+            dt=min(max(now-self.last_output if self.active else .01,.001),.05)
+            alpha=-math.expm1(-dt/.06)
+            desired={n:self.filtered.get(n,measured[n])+alpha*(v-self.filtered.get(n,measured[n]))
+                     for n,v in desired.items()}
+            self.filtered=dict(desired)
         output = slew_aux(desired,self.previous,measured,self.limits,
                           now-self.last_output if self.active else .01)
         self.publish(output)
