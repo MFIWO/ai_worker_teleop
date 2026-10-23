@@ -38,6 +38,7 @@ def main():
     p.add_argument('--robot-ip',required=True,type=hostname)
     p.add_argument('--loop',choices=('off','vr'),default='off')
     p.add_argument('--input',choices=('hands','controllers'),default='hands')
+    p.add_argument('--host-lease',action='store_true',help=argparse.SUPPRESS)
     args=p.parse_args()
     root=Path(__file__).resolve().parents[1]
     cert=root/'robotis_vuer/robotis_vuer'
@@ -52,7 +53,9 @@ def main():
     signal.signal(signal.SIGINT,interrupt)
     signal.signal(signal.SIGTERM,interrupt)
     signal.signal(signal.SIGHUP,interrupt)
+    from hardware.host_lease import watch_host
     try:
+        watch_host(args.host_lease,'/tmp/sh5_pc_session_exit.log')
         # Both rclpy processes need the robot's router before context creation.
         # Waiting here lets the two host commands be entered in either order.
         wait_for_router(args.robot_ip)

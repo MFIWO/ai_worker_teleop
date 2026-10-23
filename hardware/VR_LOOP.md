@@ -31,15 +31,41 @@ controllers first. Motion failure prevents the VR controller from starting.
 Without `--bringup`, router and follower must already run.
 
 The foreground session owns the VR controller and optional Loop streamer. On
-Ctrl+C those processes stop, followed by the router/follower started by this
-session. Tagged launch children are cleaned up even if the launch parent has
-already exited, including hand initialization executors. Already-running
-external services reused by this command are not owned by it. New PID files and logs are under
+Ctrl+C or terminal closure first stops command production. After a minimum
+three-second exit grace, the SH5 follower stops and a dedicated helper disables
+TableSync and sends Torque Enable(64)=0 to each of the 40 finger motors using
+direct motor access. It reads back each torque register; only 40 verified zeros
+produce `[HAND TORQUE OFF] Verified 40/40 finger motors`. The delay starts on
+robot-session exit detection; network/PC-heartbeat detection, launch cleanup
+and register checks add time. No position/open-hand trajectory is sent.
+
+Tagged launch children are cleaned up even if the launch parent has already
+exited. A reused **verified SH5 follower launch** is also stopped at exit so
+it cannot own the port during the torque release. A follower without a unique
+SH5 launch parent is rejected at startup; stop it and use `--bringup`. Reused
+external Zenoh services remain running. New PID files and logs are under
 `/workspace/ai_worker_xr_sessions/<id>/`. The wrapper never starts a physical
 leader. `--loop off` is the default and disables recording integration. Input mode is selected separately; `--input hands` remains the default for older commands.
 `--loop-no-camera` on the robot command selects joint/tactile/status streaming only.
 `--dry-run` prints the host command without SSH, ROS, or hardware startup.
-Allow the robot terminal to finish its `[STOP]` messages before closing it.
+The normal host wrapper sends a stdin lease through non-TTY SSH/docker exec.
+Ctrl+C closes the lease; closing/killing the host terminal or a lost connection
+also ends/expires it on the container side. The robot additionally detects a
+previously connected PC Vuer heartbeat disappearing (1.5s). B+Y/C HOLD and Quest
+tracking loss retain intent heartbeats and do **not** trigger torque OFF.
+Terminal disconnect logs are saved to the session's `exit.log` (PC side:
+`/tmp/sh5_pc_session_exit.log`). Allow cleanup to finish before restarting.
+
+The helper verifies that no other process owns the serial device. It refuses
+a second bus connection, unknown SH5 motor mappings and non-Direct-Control hand
+mode. It never clears errors, enables torque or changes operating mode. Failure
+is explicitly logged as `[HAND TORQUE OFF FAILED]`; absence of a success log
+is not proof of release. Container/power loss or killing the cleanup process
+itself cannot execute software cleanup. Restart the complete robot command to
+reactivate the follower after a terminal exit; ordinary HOLD/resume remains fast.
+The installer adds `pyserial==3.5` only to the VR helper's `vendor` directory if
+needed, using the bundled offline wheel; robot internet is not required. Native
+driver/underlay sources are not patched.
 
 The local Docker wrapper uses `sg docker` if the account belongs to the Docker
 group but its current shell lacks that group. It does not change socket modes.
@@ -315,5 +341,7 @@ returned Hardware Error Status(71)=64 (0x40) and Bus Watchdog(8)=255
 identifies these as Bus Watchdog errors after an interruption of TableSync
 communication. They may have occurred when the follower stopped; this reading
 does not establish the cause of earlier in-motion flashing or finger heating.
-No error clear, register WRITE, torque change or physical motion was performed.
+That diagnostic used READs only; no error clear, torque change or physical
+motion was performed during the diagnostic. The subsequent exit helper is
+explicitly designed to WRITE only TableSync OFF and finger Torque OFF.
 Individual finger motor temperatures and overload flags were not obtained.
