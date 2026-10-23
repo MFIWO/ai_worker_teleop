@@ -6,8 +6,8 @@ AI Worker SH5 팔·손 통합 Teleop / VR·Loop 적용 안내
 ============================================================
 저장소: https://github.com/MFIWO/ai_worker_teleop
 
-robotis-applications: SH5 팔·손 통합 Teleop 중심, --loop off --input controllers
-main: 같은 Teleop 기반 + 이번 VR·Loop 녹화/키보드 연동, --loop vr --input controllers
+robotis-applications: SH5 팔·손 통합 Teleop 중심, --loop off --input controllers --hand-mode 2
+main: 같은 Teleop 기반 + 이번 VR·Loop 녹화/키보드 연동, --loop vr --input controllers --hand-mode 2
 Loop까지 사용할 PC는 main을 받으면 팔·손 Teleop 코드도 함께 포함됩니다.
 기존 main의 SG2 backport/Loop 참고 코드는 기록으로 보존됩니다.
 
@@ -101,17 +101,28 @@ ROBOT_BUILD
 ============================================================
 # 터미널 1: robot session (--bringup은 없는 router/follower를 시작)
 bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh robot \
-  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop off --input controllers --bringup
+  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop off --input controllers --hand-mode 2 --bringup
 
 # 터미널 2: PC Vuer
 bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh pc \
-  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop off --input controllers
+  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop off --input controllers --hand-mode 2
 
 Quest 접속:
 https://192.168.6.2:8012?ws=wss://192.168.6.2:8012
 컨트롤러·몸 추적을 유지하고 A+X로 시작/재개, B+Y로 HOLD합니다.
-각 손 trigger 누른 정도로 grasp 깊이 조절, grip으로 엄지·검지·중지 pinch.
-Grip이 trigger보다 우선하며 pinch 중 약지·새끼는 열립니다.
+모드 1: 두 명령 모두 --hand-mode 1. 기존 Trigger 비례 grasp / Grip 엄지·검지·중지 pinch.
+모드 2: 아래 명령의 --hand-mode 2. 버튼은 포즈 종류만 선택하고, 각 손 Trigger로 해당 손만 비례 동작:
+  X=풀그립 / Y=진입각을 만든 뒤 그립 / B=검지 포인팅 / A=엄지를 바깥으로 벌린 뒤 그립
+  버튼을 단독으로 눌렀다 놓으면 선택됩니다. 버튼만으로 손이 움직이지 않습니다.
+  각 Trigger를 당기기 시작할 때 포즈가 잡히고, 누른 동안 해당 손의 포즈가 유지됩니다.
+  예: X 선택→왼 Trigger 유지→B 선택→오른 Trigger: 왼손 풀그립 + 오른손 포인팅.
+  Trigger를 놓으면 그 손이 열리고, 다음에 당길 때 새로 선택된 포즈를 사용합니다.
+  Grip은 두 모드 모두 기존 비례 세 손가락 pinch로 우선 적용됩니다.
+  Grip을 놓고 Trigger를 유지하면 그 손이 유지하던 Trigger 포즈로 돌아갑니다.
+  A+X 시작 / B+Y HOLD 조합과 조합 키를 하나씩 놓는 과정에서는 포즈가 바뀌지 않습니다.
+  Y/A는 측정 준비 자세를 확인한 뒤 닫으며 3초 내 도달하지 못하면 fault/HOLD합니다.
+  HX5용 20관절 포즈는 모델 기반 후보이며 실물 파지·접촉 검증은 아직 하지 않았습니다.
+두 쪽 --hand-mode가 다르면 활성화를 거절합니다. 옵션 생략은 기존 모드 1입니다.
 기존 SG2 스틱 매핑을 재사용합니다. 양쪽 스틱 클릭으로 목/mobile 모드 전환, 오른쪽은 lift.
 스틱 기본 모드: 왼쪽=목 pan/tilt, 오른쪽 위아래=lift.
 양쪽 스틱 동시 클릭 후: 왼쪽=mobile 전후/좌우, 오른쪽 좌우=회전, 위아래=lift.
@@ -134,11 +145,11 @@ PC에서 Loop 앱을 먼저 엽니다. 물리 leader는 종료한 상태로 진�
 
 # 터미널 1: robot session
 bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh robot \
-  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop vr --input controllers --bringup
+  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop vr --input controllers --hand-mode 2 --bringup
 
 # 터미널 2: PC Vuer + Quest 컨트롤러
 bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh pc \
-  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop vr --input controllers
+  --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop vr --input controllers --hand-mode 2
 
 PC를 먼저 실행해도 Zenoh 7447 포트를 최대 120초 기다립니다.
 [WAIT ZENOH]가 나오면 다른 터미널에서 robot 명령을 실행합니다.
@@ -165,6 +176,7 @@ Loop의 기존 robot 채널로 표시/저장하며 전용 손 히트맵 UI를 �
 
 컨트롤러 모드에서는 Loop 키보드 브리지를 실행하지 않습니다. 녹화/검토 키는 원래 Loop 기준입니다.
 손 입력 4개는 teleop.controller_inputs에 HOLD 중에도 기록됩니다.
+모드/선택/좌우 동작 포즈는 teleop.hand_pose_state에 함께 기록합니다.
 
 아래 키보드 조작은 두 명령 모두 --input hands로 바꾼 광학 손 모드에만 해당합니다.
 Loop 창에 포커스가 있을 때:

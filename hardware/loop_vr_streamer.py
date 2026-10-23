@@ -47,7 +47,8 @@ def main():
                     ('action_valid', 'left_arm,right_arm,left_hand,right_hand,head,lift,mobile', 'bool'),
                     ('ages', 'joint_receipt,gate_receipt,intent_receipt (-1=missing)', 's'),
                     ('clock', 'pc_anchor_age,robot_minus_pc_wallclock', 's'),
-                    ('controller_inputs', 'left_trigger,left_grip,right_trigger,right_grip', 'normalized'))]
+                    ('controller_inputs', 'left_trigger,left_grip,right_trigger,right_grip', 'normalized'),
+                    ('hand_pose_state', 'hand_mode,pending_pose,left_pose,right_pose (see VR_LOOP.md)', 'enum'))]
 
     class VRNode(LoopStreamerNode):
         def __init__(self):
@@ -178,6 +179,14 @@ def main():
                         controls = [values[side][key] for side in ('left','right') for key in ('trigger','grip')]
                     except ValueError:pass
             payload[f'{self.robot_type}.teleop.controller_inputs'] = controls
+            state=None
+            if receipt is not None and 0<=now-receipt<=.5:
+                raw_state=self.recording_status.intent.get('hand_pose_state')
+                if (isinstance(raw_state,list) and len(raw_state)==4 and all(type(v) is int for v in raw_state)
+                        and raw_state[0] in (1,2) and 0<=raw_state[1]<=4
+                        and all(0<=v<=5 for v in raw_state[2:])):
+                    state=[float(v) for v in raw_state]
+            payload[f'{self.robot_type}.teleop.hand_pose_state']=state
             if self._tick_count and self._tick_count % max(1,int(self.fps*10)) == 0:
                 for side,receipt in self.tactile.receipts.items():
                     if receipt is None or now-receipt > self.tactile.freshness:

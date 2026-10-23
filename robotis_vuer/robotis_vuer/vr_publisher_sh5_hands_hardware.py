@@ -24,6 +24,7 @@ from robotis_vuer.vr_publisher_ai_worker_hardware import HardwareXRPublisher
 from robotis_vuer.vr_publisher_sg2 import VRTrajectoryPublisher
 from rclpy.signals import SignalHandlerOptions
 from hardware.keyboard_controls import MOTION_KEYS, keyboard_aux
+from hardware.controller_hand_modes import ControllerHandModes,POSE_CODES
 
 SIDES = ('left', 'right')
 
@@ -40,6 +41,10 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
     def __init__(self, start_server=True):
         self._fast_resume_at = None
         self._controller_mode = os.environ.get('AI_WORKER_SH5_INPUT','hands') == 'controllers'
+        self._hand_mode = int(os.environ.get('AI_WORKER_SH5_HAND_MODE','1'))
+        if self._hand_mode not in (1,2) or (self._hand_mode==2 and not self._controller_mode):
+            raise ValueError('hand mode 2 requires SH5 controller input')
+        self._hand_modes = ControllerHandModes()
         self._controller_event_rx = -1e9
         self._stick_log_at = -1e9
         self._operator_keys = set()
@@ -77,6 +82,9 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         if self._controller_mode:
             self.get_logger().info('[SH5 CONTROLLERS] X+A start / Y+B HOLD; SG2 sticks; trigger=0..1 grasp, grip=3-finger pinch. Loop motion keys disabled.')
             self.get_logger().info('[STICKS] Initial HEAD mode: left=head, right up/down=lift. Both stick clicks toggle MOBILE: left=translation, right left/right=yaw. Requires ACTIVE.')
+            self.get_logger().info(f'[HAND MODE {self._hand_mode}] '+(
+                'Original proportional trigger grasp; grip=thumb/index/middle pinch.' if self._hand_mode==1 else
+                'Tap X=full grip, Y=angled grip, B=point, A=thumb-out grip. Each trigger captures its own pose until released; grip pinch overrides. AX/BY reserved.'))
         else:
             self.get_logger().info(
                 '[SH5 HANDS] Optical wrists -> existing HardwareXRPublisher; '
@@ -182,8 +190,18 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                         controls[side] = dict(trigger=self.calibrate_trigger(side,raw),grip=min(1.,max(0.,grip)))
                 except (KeyError,TypeError,ValueError):controls = None
             enabled = self.arm_control_enabled and self._phase=='ACTIVE' and not self._controller_fault_latched
+            hand_controls = controls if enabled else None
+            if self._hand_mode==2:
+                if not enabled:self._hand_modes.reset_grasps()
+                if hand_controls is not None:hand_controls=self._hand_modes.controls(hand_controls)
+            active_codes=[]
+            for side in SIDES:
+                item=(hand_controls or {}).get(side,{})
+                active_codes.append(5 if item.get('grip',0.)>.05 else
+                    POSE_CODES.get(item.get('pose','full_grip'),0) if item.get('trigger',0.)>.02 else 0)
             return {'manual_enabled':False,'hand_input':'controllers','controller_values':controls,
-                    'controller_hands':controls if enabled else None,
+                    'hand_mode':self._hand_mode,'controller_hands':hand_controls,
+                    'hand_pose_state':[self._hand_mode,POSE_CODES[self._hand_modes.selected] if self._hand_mode==2 else 0,*active_codes],
                     'recording_epoch_us':time.time_ns()//1000}
         dt, self._operator_tick = now-self._operator_tick, now
         manifest = self._hardware_manifest or {}
@@ -218,10 +236,20 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         expected = 'controllers' if self._controller_mode else 'hands'
         if (self._hardware_manifest or {}).get('hand_input','hands') != expected:
             raise ValueError('PC/robot --input must match: '+expected)
+        if self._controller_mode and (self._hardware_manifest or {}).get('hand_mode',1)!=self._hand_mode:
+            raise ValueError('PC/robot --hand-mode must match')
 
     async def on_controller_move(self, event, session):
         if not self._controller_mode:return
         self._controller_event_rx = time.monotonic()
+        with self._xr_lock:
+            if self._hand_mode==2:
+                data=event.value
+                if (self._xr_ready and isinstance(data,dict)
+                        and all(isinstance(data.get(s+'State'),dict) for s in SIDES)):
+                    changed=self._hand_modes.buttons(data['leftState'],data['rightState'])
+                    if changed:self.get_logger().info(f'[HAND POSE] {changed[0]} -> {changed[1]}; applies on each next trigger press, held poses retained')
+                else:self._hand_modes.reset_buttons()
         await HardwareXRPublisher.on_controller_move(self,event,session)
         with self._xr_lock:
             now=time.monotonic()

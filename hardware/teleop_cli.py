@@ -31,6 +31,7 @@ def parser():
     p.add_argument('--robot-ip',type=hostname,default=os.environ.get('ROBOT_IP'),required='ROBOT_IP' not in os.environ)
     p.add_argument('--loop',choices=('off','vr'),default='off')
     p.add_argument('--input',choices=('hands','controllers'),default='hands')
+    p.add_argument('--hand-mode',choices=('1','2'),default='1',help='controllers: 1=original trigger/grip, 2=button-selected trigger poses; grip pinch in both')
     p.add_argument('--bringup',action='store_true',help='robot: start missing router/follower without native initialization; raise only arms over five seconds')
     p.add_argument('--ready-pose',action='store_true',help='robot: five-second arms-only ready motion before VR starts')
     p.add_argument('--loop-no-camera',action='store_true')
@@ -44,10 +45,10 @@ def command(args,interactive):
     if args.side=='pc':
         return ['docker','exec',terminal,'robotis-applications','bash',
                 '/root/ros2_ws/src/robotis_applications/hardware/run_pc_session.sh',
-                '--pc-ip',args.pc_ip,'--robot-ip',args.robot_ip,'--loop',args.loop,'--input',args.input,'--host-lease']
+                '--pc-ip',args.pc_ip,'--robot-ip',args.robot_ip,'--loop',args.loop,'--input',args.input,'--hand-mode',args.hand_mode,'--host-lease']
     inner=['docker','exec',terminal,'ai_worker','bash',
            '/workspace/ai_worker_xr/hardware/run_robot_session.sh',
-           '--pc-ip',args.pc_ip,'--robot-ip',args.robot_ip,'--loop',args.loop,'--input',args.input,'--host-lease']
+           '--pc-ip',args.pc_ip,'--robot-ip',args.robot_ip,'--loop',args.loop,'--input',args.input,'--hand-mode',args.hand_mode,'--host-lease']
     if args.bringup:inner.append('--bringup')
     if args.ready_pose:inner.append('--ready-pose')
     if args.loop_no_camera:inner.append('--loop-no-camera')
@@ -57,6 +58,7 @@ def command(args,interactive):
 def main():
     p=parser()
     args=p.parse_args()
+    if args.hand_mode=='2' and args.input!='controllers':p.error('--hand-mode 2 requires --input controllers')
     if args.side=='pc' and (args.bringup or args.loop_no_camera or args.ready_pose):
         p.error('--bringup, --ready-pose and --loop-no-camera apply to the robot command')
     cmd=command(args,sys.stdin.isatty())

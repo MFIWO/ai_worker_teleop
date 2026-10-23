@@ -89,16 +89,60 @@ reports missing activation, tracking, feedback or profile. These logs are
 rate-limited and do not claim measured motor motion. Both-stick-click mode
 switching also requires ACTIVE, matching the existing control path.
 
-Each side's trigger continuously interpolates from open to grasp (0..1).
-Grip has priority over trigger and interpolates a thumb/index/middle tripod
-pinch; ring and little fingers remain open. Releasing grip returns to trigger
-grasp. Presets in `hx5_controller_poses.json` are URDF-based candidates, not
-physically calibrated contact/force grasps. They do not implement tactile
-force regulation. The final 40 finger targets pass through the existing robot
-gate at 100 Hz with a velocity cap of 85% of each physical URDF limit. Optical
-mode uses the same finger output cap. This reduces speed modestly; it does
-not reduce holding torque or prove thermal protection. HOLD retains measured
-positions rather than disabling torque. Stale controller input stops updates.
+### Hand mode 1: original trigger/grip
+
+`--hand-mode 1` is the default. Each side's trigger continuously interpolates
+from open to the original grasp (0..1). Grip retains the existing proportional
+thumb/index/middle tripod pinch, with ring/little open, and has priority over
+trigger. Face buttons retain the existing AX/BY session chords.
+
+### Hand mode 2: button-selected trigger pose
+
+Add `--hand-mode 2` to **both** host commands (`--input controllers` required):
+
+| Single button tap | Next trigger pose |
+|---|---|
+| X | full grip |
+| Y | angled entry, then grip |
+| B | pointing: index extended, other fingers curled |
+| A | thumb placed outside first, then four-finger grip |
+
+The button only selects a pending pose; it does not send finger motion.
+Selection commits when a single button is released. AX start and BY HOLD,
+multiple face buttons, and partial chord releases never select a pose.
+The initial selection is full grip. Each hand captures the pending selection
+when its trigger rises above 0.05, and retains that selection until its trigger
+falls to 0.02 or below. Trigger depth still continuously controls closure.
+For example, tap X and hold the left trigger, then tap B and squeeze the right
+trigger: left retains full grip while right points. Releasing each trigger
+opens that hand; the next press captures the current pending selection.
+The selected preset remains available after releasing its face button.
+
+Grip remains the same proportional tripod pinch in both modes, independently
+per hand, with priority over trigger. Releasing grip while still holding a
+trigger returns to that hand's captured trigger pose. Changing pending modes
+does not change a trigger pose already being held. HOLD clears active captures;
+starting again uses the pending selection.
+
+Y first reaches a bent entry pose; A first positions/extends the thumb outside
+while holding the other fingers. The gate waits for measured preparation
+(within 0.1rad, minimum 0.12s) before closure. Failure to reach it within 3s
+raises a gate fault and holds. For A the thumb stays outside while trigger
+scales the other four fingers. The existing velocity cap is applied throughout.
+
+HX5-D20 poses in `hx5_controller_poses.json` use 20 joints per side. The G1
+7-joint preset-selection structure and mirrored-hand convention in the local
+GR00T checkout (`b042411`, `decoupled_wbc/control/teleop/solver/hand/g1_gripper_ik_solver.py`)
+were consulted. The ABXY mapping is the operator's final mapping above; this
+checkout's Pico streamer uses trigger/grip for its hand gestures. HX5 angles
+are model-based candidates and have not been physically calibrated for contact
+or force. No tactile force regulation is added.
+
+The final 40 finger targets pass through the robot gate at 100Hz, capped at
+85% of each physical URDF velocity limit. Mode 1 and optical hand input retain
+the same cap. This reduces speed modestly; it does not reduce holding torque
+or prove thermal protection. HOLD retains measured positions rather than
+disabling torque. Stale controller input stops updates.
 
 For the prior optical hand/Loop keyboard workflow, use `--input hands` on both
 commands. That mode retains C start/HOLD/resume and the V review-key mapping.
@@ -207,6 +251,7 @@ the explicit validity/age markers below.
 | ages | joint receipt, gate receipt, PC intent receipt in seconds; missing=-1 |
 | clock | age of PC clock anchor, robot-minus-PC wall-clock difference in seconds |
 | controller_inputs | left trigger, left grip, right trigger, right grip (0..1); missing for optical/stale input; retained during HOLD |
+| hand_pose_state | mode (1/2), pending selection, left active pose, right active pose; 0=none, 1=full grip, 2=angled grip, 3=point, 4=thumb-out grip, 5=grip pinch (active sides only) |
 
 Recording freshness is 0.5s and is independent of the longer teleop grace
 period. Status sequence numbers reject repeated/out-of-order heartbeats. HOLD
