@@ -41,6 +41,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self._fast_resume_at = None
         self._controller_mode = os.environ.get('AI_WORKER_SH5_INPUT','hands') == 'controllers'
         self._controller_event_rx = -1e9
+        self._stick_log_at = -1e9
         self._operator_keys = set()
         self._operator_rx = -1e9
         self._operator_tick = time.monotonic()
@@ -75,6 +76,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self.create_service(SetBool, '/sh5_teleop/enable', self._enable_service)
         if self._controller_mode:
             self.get_logger().info('[SH5 CONTROLLERS] X+A start / Y+B HOLD; SG2 sticks; trigger=0..1 grasp, grip=3-finger pinch. Loop motion keys disabled.')
+            self.get_logger().info('[STICKS] Initial HEAD mode: left=head, right up/down=lift. Both stick clicks toggle MOBILE: left=translation, right left/right=yaw. Requires ACTIVE.')
         else:
             self.get_logger().info(
                 '[SH5 HANDS] Optical wrists -> existing HardwareXRPublisher; '
@@ -132,6 +134,35 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 self._aux_base = [0.,0.,0.]
                 self._aux_joints.clear()
             super()._heartbeat()
+
+    def _controller_aux_selected(self):
+        return (self._controller_mode and time.monotonic()-self._controller_event_rx <= .3
+                and bool((self._hardware_manifest or {}).get('manual_auxiliary')))
+
+    def _report_sticks(self, now, allowed):
+        active = False
+        for side in SIDES:
+            state = getattr(self,side+'_controller_state',None)
+            if not isinstance(state,dict):continue
+            active = active or bool(state.get('thumbstick'))
+            values = state.get('thumbstickValue',[])
+            if isinstance(values,(list,tuple)):
+                active = active or any(isinstance(v,(int,float)) and np.isfinite(v) and abs(v)>.1 for v in values[:2])
+        if not active or now-self._stick_log_at<2.:return
+        self._stick_log_at = now
+        mode = 'HEAD' if self.joystick_mode else 'MOBILE'
+        if allowed:
+            self.get_logger().info(f'[STICK INTENT] mode={mode}; joints={self._aux_joints}; base={self._aux_base}')
+        else:
+            reasons=[]
+            manifest=self._hardware_manifest or {}
+            if not self.arm_control_enabled or self._phase!='ACTIVE':reasons.append(f'phase={self._phase}; A+X must reach ACTIVE')
+            if not self.hardware_allow_arm:reasons.append('PC --arm missing')
+            if not manifest.get('manual_auxiliary') or not manifest.get('auxiliary_limits'):reasons.append('robot controller-stick profile missing; restart matching robot command')
+            if self._controller_fault_latched:reasons.append('controller/gate fault')
+            if self._tracking_input_state(now)!='fresh':reasons.append('controller/body tracking not fresh')
+            if self._feedback_input_state(now)!='fresh':reasons.append('robot feedback not fresh')
+            self.get_logger().warning(f'[STICK BLOCKED] mode={mode}; '+('; '.join(reasons) or 'controller auxiliary input unavailable'))
 
     def _extra_intent(self, now):
         if self._controller_mode:
@@ -193,12 +224,13 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self._controller_event_rx = time.monotonic()
         await HardwareXRPublisher.on_controller_move(self,event,session)
         with self._xr_lock:
-            if (self.arm_control_enabled and self._phase=='ACTIVE' and self._tracking_input_state()=='fresh'
-                    and self._feedback_input_state(time.monotonic())=='fresh'
-                    and (self._hardware_manifest or {}).get('auxiliary_limits')):
+            now=time.monotonic()
+            allowed=self._controller_aux_ready(now)
+            if allowed:
                 VRTrajectoryPublisher.process_thumbstick(self)
                 if self._head_target_clamped is not None:self.last_head_command=self._head_target_clamped
                 if 'lift_joint' in self._aux_joints:self.last_lift_command=self._aux_joints['lift_joint']
+            self._report_sticks(now,allowed)
             self._heartbeat()
 
     def _reset_hand_input(self):
