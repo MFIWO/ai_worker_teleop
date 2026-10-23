@@ -400,3 +400,35 @@ That diagnostic used READs only; no error clear, torque change or physical
 motion was performed during the diagnostic. The subsequent exit helper is
 explicitly designed to WRITE only TableSync OFF and finger Torque OFF.
 Individual finger motor temperatures and overload flags were not obtained.
+
+## Robot eth0 boot conflict
+
+On 2026-10-23, this robot's `/etc/netplan/interfaces.yaml` used `networkd`
+and assigned eth0 `192.168.6.2/24`, while its saved NetworkManager profile
+assigned `192.168.6.50/24`. Udev reported `NM_UNMANAGED=1`; the boot log
+left eth0 unmanaged until manual activation. The PC log also recorded a
+conflict for its `.2` address from the robot's MAC. PC USB Ethernet already
+had autoconnect enabled.
+
+The robot HOST helper is deliberately separate from motor/source installation:
+
+```bash
+ssh -t robotis@192.168.6.50 \
+  'sudo python3 ~/ai_worker_teleop_sh5/hardware/fix_robot_ethernet.py'
+```
+
+It checks the narrow known Netplan layout and active static-IP NM profile,
+backs up the configuration, replaces the obsolete networkd definition with
+[Netplan's NetworkManager renderer](https://netplan.readthedocs.io/en/stable/nm-all/),
+and preserves the existing `.50` connection. Autoconnect stays enabled with
+[unlimited retries](https://www.networkmanager.dev/docs/api/latest/settings-connection.html).
+It runs `netplan generate` for the next boot and does not restart networking,
+apply a live address change, reboot, or start any robot controller. A backup
+and restore script path are printed; errors restore the previous settings.
+The final root application requires the robot's sudo authentication. Boot-time
+reconnection still needs confirmation after an operator-controlled reboot.
+
+Applied to `ffw-SNPR48A1114` on 2026-10-23. The retained eth0 profile reads
+`192.168.6.50/24`, autoconnect=yes, retries=0. Backup:
+`/var/backups/ai-worker-ethernet/1777511249356407928`. SSH remained connected;
+a real reboot/boot-time reconnection has not been exercised.

@@ -268,3 +268,28 @@ BusWatchdog=-1을 확인했습니다. 통신 중단 후 Watchdog 오류이며 �
 위 진단에서는 오류 해제/토크 변경/로봇 이동을 수행하지 않았습니다.
 새 종료 helper는 종료 시 TableSync OFF 및 손가락 Torque OFF만 쓰도록 추가했습니다.
 속도 85% 설정은 발열 해결을 보장하지 않습니다.
+
+============================================================
+8. 로봇 재부팅 후 eth0를 매번 수동으로 켜야 할 때 (이 로봇에서 확인)
+============================================================
+2026-10-23 진단: Netplan /etc/netplan/interfaces.yaml은 networkd/eth0=192.168.6.2,
+NetworkManager의 Wired connection 1은 eth0=192.168.6.50로 충돌했습니다.
+부팅 때 NM_UNMANAGED=1로 eth0가 제외되고, 로봇 MAC이 PC의 .2 주소와 충돌한 기록도 있었습니다.
+PC USB LAN의 자동 연결은 이미 켜져 있었습니다.
+
+다음은 로봇 HOST의 sudo 비밀번호가 필요하므로 PC 터미널에서 한 번 직접 실행합니다:
+ssh -t robotis@192.168.6.50 \
+  'sudo python3 ~/ai_worker_teleop_sh5/hardware/fix_robot_ethernet.py'
+
+이 스크립트는 해당 Netplan 충돌 형태를 확인한 뒤 백업하고,
+기존 .50 고정 IP NetworkManager 프로필로 다음 부팅 시 자동 연결하도록 통일합니다.
+자동 연결 재시도는 무제한으로 설정하며, 현재 연결을 재시작하거나 로봇을 재부팅하지 않습니다.
+다른 Netplan 파일/인터페이스가 있으면 자동 수정하지 않고 중단합니다.
+백업/되돌리기 명령은 실행 결과에 표시합니다. 다음 실제 재부팅 후 자동 연결 확인이 필요합니다.
+이 작업은 일반 helper 설치에 포함된 자동 실행 단계가 아닙니다.
+참고: https://netplan.readthedocs.io/en/stable/nm-all/
+
+현재 ffw-SNPR48A1114에는 2026-10-23 수정 적용 완료:
+  eth0=192.168.6.50/24, autoconnect=yes, retries=0(무제한)
+  백업: /var/backups/ai-worker-ethernet/1777511249356407928
+현재 SSH 연결은 유지됐으며 실제 재부팅 검증은 아직 하지 않았습니다.
