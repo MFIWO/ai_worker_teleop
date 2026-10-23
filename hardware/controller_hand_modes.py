@@ -1,6 +1,9 @@
 """Controller preset selection; no ROS or hardware side effects."""
+import time
+
 POSE_BUTTONS = {'X':'full_grip','Y':'angled_grip','B':'point','A':'thumb_out_grip'}
 POSE_CODES = {'full_grip':1,'angled_grip':2,'point':3,'thumb_out_grip':4}
+BUTTON_RELEASE_GRACE = .15
 
 
 class ControllerHandModes:
@@ -9,26 +12,37 @@ class ControllerHandModes:
         self.previous = frozenset()
         self.candidate = None
         self.chord = False
+        self.pending = None
+        self.blocked_until = -float('inf')
         self.captured = {'left':None,'right':None}
 
-    def buttons(self,left,right):
+    def buttons(self,left,right,now=None):
+        now = time.monotonic() if now is None else now
         pressed = frozenset(key for key,down in (
             ('X',left.get('aButton',False)),('Y',left.get('bButton',False)),
             ('A',right.get('aButton',False)),('B',right.get('bButton',False))) if down)
         changed = None
-        if len(pressed)>1 or (pressed and self.previous and pressed!=self.previous):
+        if (len(pressed)>1 or (pressed and now<self.blocked_until)
+                or (pressed and self.pending is not None)
+                or (pressed and self.previous and pressed!=self.previous)):
             self.chord = True
             self.candidate = None
+            self.pending = None
         elif pressed and not self.previous and not self.chord:
             self.candidate = next(iter(pressed))
         elif not pressed:
-            # Commit a single-button tap on release. AX/BY and their partial
-            # releases never select a hand pose or move a finger.
+            # Wait for a quiet release interval before committing a tap.
+            # Cross-controller event skew must not turn AX/BY into a preset.
+            if self.chord:self.blocked_until=now+BUTTON_RELEASE_GRACE
             if self.candidate is not None and not self.chord:
-                self.selected = POSE_BUTTONS[self.candidate]
-                changed = (self.candidate,self.selected)
+                self.pending = (self.candidate,now)
             self.candidate = None
             self.chord = False
+            if self.pending is not None and now-self.pending[1]>=BUTTON_RELEASE_GRACE:
+                button,_ = self.pending
+                self.selected = POSE_BUTTONS[button]
+                changed = (button,self.selected)
+                self.pending = None
         self.previous = pressed
         return changed
 
@@ -38,6 +52,7 @@ class ControllerHandModes:
     def reset_buttons(self):
         self.previous = frozenset()
         self.candidate = None
+        self.pending = None
         self.chord = True  # require an observed all-released frame
 
     def controls(self,values):

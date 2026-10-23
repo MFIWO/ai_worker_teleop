@@ -110,7 +110,9 @@ Add `--hand-mode 2` to **both** host commands (`--input controllers` required):
 The button selects a pose for hands whose triggers are released. Selecting Y
 smoothly forms the C-shaped `angled_prepare` rest pose while ACTIVE, even with
 zero trigger. Hands already holding a trigger retain their captured pose.
-Selection commits when a single button is released. AX start and BY HOLD,
+Selection commits after a single-button release remains quiet for 150ms.
+Another face-button event during that interval cancels selection, accommodating
+cross-controller timing differences. AX start and BY HOLD,
 multiple face buttons, and partial chord releases never select a pose.
 The initial selection is full grip. Each hand captures the pending selection
 when its trigger rises above 0.05, and retains that selection until its trigger
