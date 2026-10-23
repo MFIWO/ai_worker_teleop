@@ -46,7 +46,8 @@ def main():
                     ('action_fresh', 'left_arm,right_arm,left_hand,right_hand,head,lift,mobile', 'bool'),
                     ('action_valid', 'left_arm,right_arm,left_hand,right_hand,head,lift,mobile', 'bool'),
                     ('ages', 'joint_receipt,gate_receipt,intent_receipt (-1=missing)', 's'),
-                    ('clock', 'pc_anchor_age,robot_minus_pc_wallclock', 's'))]
+                    ('clock', 'pc_anchor_age,robot_minus_pc_wallclock', 's'),
+                    ('controller_inputs', 'left_trigger,left_grip,right_trigger,right_grip', 'normalized'))]
 
     class VRNode(LoopStreamerNode):
         def __init__(self):
@@ -165,6 +166,18 @@ def main():
                 mobile_command=self._twist_vector(self._leader_mobile_msg))
             payload.update({f'{self.robot_type}.teleop.{k}':v for k,v in self.recording_status.values(now).items()})
             payload.update(self.tactile.payload(self.robot_type,now))
+            # Keep raw button depths during HOLD; they are inputs, not actions.
+            controls = None
+            receipt = self.recording_status.intent_rx
+            if receipt is not None and 0 <= now-receipt <= .5:
+                raw = self.recording_status.intent.get('controller_values')
+                if raw is not None:
+                    from hardware.sh5_controller_hands import control_values
+                    try:
+                        values = control_values(raw)
+                        controls = [values[side][key] for side in ('left','right') for key in ('trigger','grip')]
+                    except ValueError:pass
+            payload[f'{self.robot_type}.teleop.controller_inputs'] = controls
             if self._tick_count and self._tick_count % max(1,int(self.fps*10)) == 0:
                 for side,receipt in self.tactile.receipts.items():
                     if receipt is None or now-receipt > self.tactile.freshness:

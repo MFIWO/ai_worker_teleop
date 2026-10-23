@@ -6,6 +6,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
   echo 'Usage: bash run_xr_hardware_pc.sh sg2|sh5 [--start | --arm] [--hands] [--ready-pose | --ready-only] [--server-ip PC_IPv4] [--robot-ip ROBOT_IP_OR_HOSTNAME] [--strict-commissioning]'
   echo '  --hands: SH5 bare wrists + native hand retarget; use sh5 --arm --hands.'
+  echo '  --input controllers: SH5 SG2-style Quest controllers, proportional grasp and three-finger pinch.'
   echo '  --start: SG2 only; existing ready-pose move, then armed Vuer (manual X+A still required).'
   echo '  --server-ip: PC address used by Quest; validate its TLS certificate before any ready move.'
   echo '  --robot-ip: robot Zenoh router address; this is NOT the Vuer certificate address.'
@@ -26,6 +27,9 @@ while (( $# )); do
     --start) PREPARE_READY=1; export AI_WORKER_XR_ALLOW_ARM=1 ;; # [CHANGED] Explicit motion opt-in.
     --arm) export AI_WORKER_XR_ALLOW_ARM=1 ;;
     --hands) HANDS=1 ;;
+    --input)
+      [[ "${2:-}" == hands || "${2:-}" == controllers ]] || { echo '[ERROR] --input hands|controllers'; exit 2; }
+      export AI_WORKER_SH5_INPUT="$2"; HANDS=1; shift ;;
     --ready-pose) PREPARE_READY=1 ;;
     --ready-only) READY_ONLY=1; PREPARE_READY=1 ;;
     --strict-commissioning) READINESS_POLICY=strict_torque ;;
@@ -144,6 +148,10 @@ fi
 PUBLISHER=robotis_vuer.vr_publisher_ai_worker_hardware
 if (( HANDS )); then
   PUBLISHER=robotis_vuer.vr_publisher_sh5_hands_hardware
-  echo '[SH5 HANDS] Bare wrists + SH5 fingers. Pinch + opposite squeeze for 3s starts/stops.'
+  if [[ "${AI_WORKER_SH5_INPUT:-hands}" == controllers ]]; then
+    echo '[SH5 CONTROLLERS] X+A start, Y+B stop; trigger=proportional grasp; grip=thumb/index/middle pinch.'
+  else
+    echo '[SH5 HANDS] Bare wrists + SH5 fingers. Pinch + opposite squeeze for 3s starts/stops.'
+  fi
 fi
 exec python3 -m "$PUBLISHER" --ros-args -r __node:=ai_worker_xr_hardware
