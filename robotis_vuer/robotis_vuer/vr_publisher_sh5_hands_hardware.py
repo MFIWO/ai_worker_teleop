@@ -17,10 +17,11 @@ from geometry_msgs.msg import Point32
 from robotis_interfaces.msg import HandJoints
 from std_srvs.srv import SetBool
 from std_msgs.msg import String
-from vuer.schemas import Body, Hands, Scene
+from vuer.schemas import Body, Hands, Scene, MotionControllers
 
 from robotis_vuer.sh5_optical_hand import parse_hand_poses, retarget_sh5_hand
 from robotis_vuer.vr_publisher_ai_worker_hardware import HardwareXRPublisher
+from robotis_vuer.vr_publisher_sg2 import VRTrajectoryPublisher
 from rclpy.signals import SignalHandlerOptions
 from hardware.keyboard_controls import MOTION_KEYS, keyboard_aux
 
@@ -38,6 +39,8 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
     POST_STOP_POSE_SECONDS = 0.05
     def __init__(self, start_server=True):
         self._fast_resume_at = None
+        self._controller_mode = os.environ.get('AI_WORKER_SH5_INPUT','hands') == 'controllers'
+        self._controller_event_rx = -1e9
         self._operator_keys = set()
         self._operator_rx = -1e9
         self._operator_tick = time.monotonic()
@@ -48,31 +51,35 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self._base_last_input = -1e9
         self._operator_release_required = False
         self._operator_block_log_at = -1e9
-        self._loop_controls = os.environ.get('AI_WORKER_LOOP_CONTROLS') == '1'
+        self._loop_controls = os.environ.get('AI_WORKER_LOOP_CONTROLS') == '1' and not self._controller_mode
         self._gesture_since = None
         self._gesture_ready = False
         self._gesture_latched = False
         self._hand_previous = dict.fromkeys(SIDES)
         self._last_hand_event = None
         super().__init__(start_server=False)
-        if self._loop_controls:
+        if self._loop_controls or self._controller_mode:
             # Native leader joystick updates at 100 Hz. Held keys use the same
             # measured-position jog cadence; other modes retain their heartbeat.
             self._intent_timer.cancel()
             self.destroy_timer(self._intent_timer)
             self._intent_timer = self.create_timer(.01, self._heartbeat)
-            self.create_subscription(String, '/xr_hardware/operator_keys', self._operator_input, 10)
+            if self._loop_controls:
+                self.create_subscription(String, '/xr_hardware/operator_keys', self._operator_input, 10)
         if self.hardware_model != "sh5":
             raise ValueError("Optical SH5 hands require --model sh5")
-        self._hand_publishers = {side: self.create_publisher(
+        self._hand_publishers = {} if self._controller_mode else {side: self.create_publisher(
             HandJoints, f'/{side}_hand/hand_joint_pos', self.vr_stream_qos)
             for side in SIDES}
-        self.vuer.add_handler('HAND_MOVE')(self.on_hand_move)
+        if not self._controller_mode:self.vuer.add_handler('HAND_MOVE')(self.on_hand_move)
         self.create_service(SetBool, '/sh5_teleop/enable', self._enable_service)
-        self.get_logger().info(
-            '[SH5 HANDS] Optical wrists -> existing HardwareXRPublisher; '
-            'fingers -> original ROBOTIS retargeting_teleop. '
-            'Release gestures, then pinch + opposite squeeze for 3s to start/stop.')
+        if self._controller_mode:
+            self.get_logger().info('[SH5 CONTROLLERS] X+A start / Y+B HOLD; SG2 sticks; trigger=0..1 grasp, grip=3-finger pinch. Loop motion keys disabled.')
+        else:
+            self.get_logger().info(
+                '[SH5 HANDS] Optical wrists -> existing HardwareXRPublisher; '
+                'fingers -> original ROBOTIS retargeting_teleop through the hand gate. '
+                'Release gestures, then pinch + opposite squeeze for 3s to start/stop.')
         if start_server:
             self.start_vuer_server()
 
@@ -121,9 +128,32 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
 
     def _heartbeat(self):
         with self._xr_lock:
+            if self._controller_mode and time.monotonic()-self._controller_event_rx>.3:
+                self._aux_base = [0.,0.,0.]
+                self._aux_joints.clear()
             super()._heartbeat()
 
     def _extra_intent(self, now):
+        if self._controller_mode:
+            controls = None
+            fresh = now-self._controller_event_rx <= .3 and self._tracking_input_state(now)=='fresh'
+            if not fresh:
+                self._aux_base = [0.,0.,0.]
+                self._aux_joints.clear()
+            if fresh:
+                try:
+                    controls = {}
+                    for side in SIDES:
+                        state = getattr(self,side+'_controller_state')
+                        raw = float(state['triggerValue'])
+                        grip = float(state.get('squeezeValue',float(bool(state.get('squeeze',False)))))
+                        if not np.isfinite([raw,grip]).all():raise ValueError('nonfinite controller hand input')
+                        controls[side] = dict(trigger=self.calibrate_trigger(side,raw),grip=min(1.,max(0.,grip)))
+                except (KeyError,TypeError,ValueError):controls = None
+            enabled = self.arm_control_enabled and self._phase=='ACTIVE' and not self._controller_fault_latched
+            return {'manual_enabled':False,'hand_input':'controllers','controller_values':controls,
+                    'controller_hands':controls if enabled else None,
+                    'recording_epoch_us':time.time_ns()//1000}
         dt, self._operator_tick = now-self._operator_tick, now
         manifest = self._hardware_manifest or {}
         allowed = (self._loop_controls and self.hardware_allow_arm and manifest.get('manual_auxiliary')
@@ -154,10 +184,22 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         super()._graph_check()
         if (self._hardware_manifest or {}).get('hand_control') != 'robotis_native_measured_fingers':
             raise ValueError('Robot must run sh5 --hands with the measured-finger model')
+        expected = 'controllers' if self._controller_mode else 'hands'
+        if (self._hardware_manifest or {}).get('hand_input','hands') != expected:
+            raise ValueError('PC/robot --input must match: '+expected)
 
     async def on_controller_move(self, event, session):
-        """Only optical wrists may feed the existing arm path in this mode."""
-        return
+        if not self._controller_mode:return
+        self._controller_event_rx = time.monotonic()
+        await HardwareXRPublisher.on_controller_move(self,event,session)
+        with self._xr_lock:
+            if (self.arm_control_enabled and self._phase=='ACTIVE' and self._tracking_input_state()=='fresh'
+                    and self._feedback_input_state(time.monotonic())=='fresh'
+                    and (self._hardware_manifest or {}).get('auxiliary_limits')):
+                VRTrajectoryPublisher.process_thumbstick(self)
+                if self._head_target_clamped is not None:self.last_head_command=self._head_target_clamped
+                if 'lift_joint' in self._aux_joints:self.last_lift_command=self._aux_joints['lift_joint']
+            self._heartbeat()
 
     def _reset_hand_input(self):
         self._hand_previous = dict.fromkeys(SIDES)
@@ -293,6 +335,8 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         super()._event(tag,message)
 
     async def main_hand_tracking(self, session):
+        if self._controller_mode:
+            return await VRTrajectoryPublisher.main_hand_tracking(self,session)
         session.set @ Scene(
             Body(fps=self.fps, stream=True, key='body_tracking',
                  leftHand=False, rightHand=False, hideIndicate=False,

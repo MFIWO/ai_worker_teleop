@@ -1,0 +1,130 @@
+"""HX5-D20 controller synergies, applied only by the existing robot gate."""
+import json
+import math
+from pathlib import Path
+
+from hardware.sh5_hands_model import FINGER_NAMES
+
+HAND_TOPICS = {side: f'/leader/joint_trajectory_command_broadcaster_{side}_hand/joint_trajectory'
+               for side in FINGER_NAMES}
+NATIVE_TOPICS = {side:f'/xr_hardware/sh5/native_{side}_hand' for side in FINGER_NAMES}
+HAND_SPEED_SCALE = .85
+
+
+def control_values(payload):
+    if not isinstance(payload,dict) or set(payload) != set(FINGER_NAMES):
+        raise ValueError('controller hands require both left/right inputs')
+    result = {}
+    for side in FINGER_NAMES:
+        item = payload[side]
+        if not isinstance(item,dict) or set(item) != {'trigger','grip'}:
+            raise ValueError('expected trigger/grip per hand')
+        values = {}
+        for key,value in item.items():
+            if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError('trigger/grip must be finite values in 0..1')
+            values[key] = float(value)
+        result[side] = values
+    return result
+
+
+def load_poses(limits):
+    config = json.loads(Path(__file__).with_name('hx5_controller_poses.json').read_text())
+    if config.get('schema') != 1 or config.get('model') != 'HX5-D20':
+        raise ValueError('unsupported controller hand pose layout')
+    for side,names in FINGER_NAMES.items():
+        if set(config['poses'][side]) != {'open','grasp','pinch'}:
+            raise ValueError('hand pose definitions missing')
+        for pose in config['poses'][side].values():
+            if len(pose) != 20:raise ValueError('hand pose requires 20 joint positions')
+            for name,value in zip(names,pose):
+                bound = limits[name]
+                if not math.isfinite(value) or not bound['lower'] <= value <= bound['upper']:
+                    raise ValueError(f'{name}: controller hand pose outside physical URDF bounds')
+    return config['poses']
+
+
+def targets(poses,controls):
+    result = {}
+    for side,item in controls.items():
+        # Grip has priority: thumb/index/middle pinch, ring/little stay open.
+        mode = 'pinch' if item['grip'] > .05 else 'grasp'
+        depth = item['grip'] if mode == 'pinch' else item['trigger']
+        result.update({name: opened+depth*(closed-opened)
+                       for name,opened,closed in zip(FINGER_NAMES[side],poses[side]['open'],poses[side][mode])})
+    return result
+
+
+class SH5HandOutput:
+    def __init__(self,node,limits,mode):
+        if mode not in ('hands','controllers'):raise ValueError('unsupported SH5 input mode')
+        from trajectory_msgs.msg import JointTrajectory
+        from rclpy.qos import QoSProfile,ReliabilityPolicy
+        self.node,self.mode = node,mode
+        self.limits = {n:dict(b,velocity=b['velocity']*HAND_SPEED_SCALE) for n,b in limits.items()}
+        self.poses = load_poses(limits) if mode=='controllers' else None
+        self.native = {}
+        self.publishers = {side:node.create_publisher(JointTrajectory,topic,10) for side,topic in HAND_TOPICS.items()}
+        if mode=='hands':
+            qos = QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT)
+            self.subscriptions = [node.create_subscription(JointTrajectory,topic,
+                lambda msg,side=side:self.native_trajectory(side,msg),qos) for side,topic in NATIVE_TOPICS.items()]
+        self.controls = None
+        self.rx = -math.inf
+        self.previous = {}
+        self.active = False
+        self.last_output = 0.
+
+    def receive(self,payload,now):
+        self.controls = None if payload is None else control_values(payload)
+        self.rx = now
+
+    def native_trajectory(self,side,msg):
+        import time
+        try:
+            if (len(msg.points)!=1 or len(msg.joint_names)!=20 or len(set(msg.joint_names))!=20
+                    or set(msg.joint_names)!=set(FINGER_NAMES[side]) or len(msg.points[0].positions)!=20):
+                raise ValueError('expected complete named 20-joint native hand trajectory')
+            values = dict(zip(msg.joint_names,msg.points[0].positions))
+            if any(not math.isfinite(v) or not self.limits[n]['lower']-1e-4<=v<=self.limits[n]['upper']+1e-4 for n,v in values.items()):
+                raise ValueError('native hand target outside physical bounds')
+            values = {n:min(self.limits[n]['upper'],max(self.limits[n]['lower'],v)) for n,v in values.items()}
+            self.native[side] = (values,time.monotonic())
+        except ValueError as error:
+            self.native.pop(side,None)
+            if self.node.intent_enabled:self.node.latch(str(error))
+
+    def graph(self):
+        for topic in HAND_TOPICS.values():
+            writers = self.node.get_publishers_info_by_topic(topic)
+            if len(writers) != 1 or writers[0].node_name != self.node.get_name():
+                raise ValueError('controller hand output requires one gate writer; stop native/other hand retargeters')
+
+    def publish(self,values):
+        from trajectory_msgs.msg import JointTrajectory,JointTrajectoryPoint
+        for side,names in FINGER_NAMES.items():
+            if not all(n in values for n in names):continue
+            self.publishers[side].publish(JointTrajectory(joint_names=list(names),
+                points=[JointTrajectoryPoint(positions=[float(values[n]) for n in names])]))
+
+    def hold(self,measured,fresh):
+        if self.active and fresh:
+            self.publish(measured)
+        self.active = False
+        self.previous.clear()
+
+    def tick(self,measured,now,allowed):
+        from hardware.aux_controls import slew_aux
+        ready = (self.controls is not None and now-self.rx<=.3) if self.mode=='controllers' else (
+            len(self.native)==2 and all(now-stamp<=.3 for _,stamp in self.native.values()))
+        if not allowed or not ready:
+            self.hold(measured,now-self.node.measured_rx <= .5)
+            return
+        desired = (targets(self.poses,self.controls) if self.mode=='controllers' else
+                   {n:v for values,_ in self.native.values() for n,v in values.items()})
+        if not set(desired).issubset(measured):
+            raise ValueError('controller hands require all 40 fresh measured finger joints')
+        output = slew_aux(desired,self.previous,measured,self.limits,
+                          now-self.last_output if self.active else .01)
+        self.publish(output)
+        self.previous,self.last_output,self.active = output,now,True

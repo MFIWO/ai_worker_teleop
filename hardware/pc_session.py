@@ -37,6 +37,7 @@ def main():
     p.add_argument('--pc-ip',required=True,type=ipv4)
     p.add_argument('--robot-ip',required=True,type=hostname)
     p.add_argument('--loop',choices=('off','vr'),default='off')
+    p.add_argument('--input',choices=('hands','controllers'),default='hands')
     args=p.parse_args()
     root=Path(__file__).resolve().parents[1]
     cert=root/'robotis_vuer/robotis_vuer'
@@ -44,7 +45,8 @@ def main():
                     '--key',str(cert/'key.pem'),'--server-ip',args.pc_ip],check=True)
     env=os.environ.copy()
     env.pop('ZENOH_CONFIG_OVERRIDE',None)
-    env['AI_WORKER_LOOP_CONTROLS']='1' if args.loop=='vr' else '0'
+    env['AI_WORKER_SH5_INPUT']=args.input
+    env['AI_WORKER_LOOP_CONTROLS']='1' if args.loop=='vr' and args.input=='hands' else '0'
     processes=[]
     def interrupt(*_):raise KeyboardInterrupt
     signal.signal(signal.SIGINT,interrupt)
@@ -54,7 +56,7 @@ def main():
         # Both rclpy processes need the robot's router before context creation.
         # Waiting here lets the two host commands be entered in either order.
         wait_for_router(args.robot_ip)
-        if args.loop=='vr':
+        if args.loop=='vr' and args.input=='hands':
             keyboard_env=env.copy()
             keyboard_env['ZENOH_CONFIG_OVERRIDE']=f'mode="client";connect/endpoints=["tcp/{args.robot_ip}:7447"]'
             processes.append(('Loop keys',start([sys.executable,'-m','robotis_vuer.loop_operator'],env=keyboard_env)))

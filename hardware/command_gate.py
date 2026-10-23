@@ -52,11 +52,19 @@ class HardwareCommandGate(Node):
         deployment_domain()
         self.profile = load_profile(profile_path)
         super().__init__(GATE_NAME)
+        self.profile['hand_input'] = os.environ.get('AI_WORKER_SH5_INPUT','hands')
+        if self.profile['model']=='sh5' and self.profile.get('finger_limits'):
+            from hardware.sh5_controller_hands import HAND_SPEED_SCALE
+            self.profile['hand_speed_scale'] = HAND_SPEED_SCALE
         public_profile = {k: v for k, v in self.profile.items()
                           if k not in ('model_report', 'initial_collision_report')}
         self.declare_parameter('profile_json', json.dumps(public_profile),
                                ParameterDescriptor(read_only=True))
         self.model = self.profile['model']
+        self.controller_hands = None
+        if self.model=='sh5' and self.profile.get('finger_limits'):
+            from hardware.sh5_controller_hands import SH5HandOutput
+            self.controller_hands = SH5HandOutput(self,self.profile['finger_limits'],self.profile['hand_input'])
         self.aux_collision = None
         if self.profile.get('manual_auxiliary'):
             from hardware.check_collision import AuxiliaryCollisionGuard
@@ -185,6 +193,10 @@ class HardwareCommandGate(Node):
         # uses the existing driver's torque management, not a broken extra proof.
         bus_ok = motor_read_health(
             msg.id, msg.dxl_hw_state, msg.comm_state, self.profile['arm_dxl_ids'])
+        if self.controller_hands:
+            # Also reject errors on any reported hand/robot device. This does
+            # not claim missing temperature/board registers were measured.
+            bus_ok = bus_ok and motor_read_health(msg.id,msg.dxl_hw_state,msg.comm_state,{'reported':list(msg.id)})
         reported_ok = motor_health(
             msg.id, msg.torque_state, msg.dxl_hw_state, msg.comm_state,
             self.profile['arm_dxl_ids'])
@@ -221,6 +233,10 @@ class HardwareCommandGate(Node):
             if manual:
                 aux = validate_aux(data.get('manual_aux', {}), self.profile['auxiliary_limits'])
             self.intent_rx = time.monotonic()
+            if self.controller_hands and self.profile['hand_input']=='controllers':
+                self.controller_hands.receive(data.get('controller_hands'),self.intent_rx)
+            elif data.get('controller_hands') is not None:
+                raise ValueError('PC controller input does not match robot hand mode')
             enabled = data['enabled']
             self.pc_intent_enabled = enabled
             if enabled and not self.intent_enabled:
@@ -262,6 +278,7 @@ class HardwareCommandGate(Node):
             self.latch('reference checker/controller fault')
 
     def graph(self):
+        if self.controller_hands:self.controller_hands.graph()
         if any(name == 'arm_retargeting_teleop' for name, _ in self.get_node_names_and_namespaces()):
             raise ValueError('legacy arm retargeter must be stopped')
         if self.aux_pub:
@@ -317,6 +334,8 @@ class HardwareCommandGate(Node):
         self.aux_active = bool(joints or any(base))
 
     def hold(self, reason):
+        if self.controller_hands:
+            self.controller_hands.hold(self.measured,time.monotonic()-self.measured_rx <= .5)
         self.manual_enabled = False
         self.feedback_waiting = False
         # [SAFETY] One measured position-hold, only after this gate was driving.
@@ -458,6 +477,7 @@ class HardwareCommandGate(Node):
                     else:
                         self.feedback_waiting = False
                     if waiting:
+                        if self.controller_hands:self.controller_hands.hold(self.measured,now-self.measured_rx<=.5)
                         self.publish_status(now)
                         return
                     target = {k: v for values, _ in self.commands.values() for k, v in values.items()}
@@ -488,6 +508,13 @@ class HardwareCommandGate(Node):
                     self.reason = 'forwarding validated arm and auxiliary targets'
         except (ValueError, KeyError) as error:
             self.latch(str(error))
+        if self.controller_hands:
+            try:
+                self.controller_hands.tick(self.measured,now,
+                    self.intent_enabled and self.fault is None and self.output_active and not self.feedback_waiting
+                    and now-self.intent_rx <= .3 and now-self.measured_rx <= .5
+                    and self.motor_ok and now-self.motor_rx <= .5)
+            except (ValueError,KeyError) as error:self.latch('controller hands: '+str(error))
         self.publish_status(now)
 
     def publish_status(self, now):

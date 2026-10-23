@@ -9,21 +9,26 @@ means the robot session/router still needs attention. Ctrl+C cancels the wait.
 
 ```bash
 cd ~/Downloads/external_repos/ai_worker_teleop_deploy
-bash teleop.sh pc --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop vr
+bash teleop.sh pc --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop vr --input controllers
 ```
 
 ```bash
 cd ~/Downloads/external_repos/ai_worker_teleop_deploy
-bash teleop.sh robot --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop vr --bringup
+bash teleop.sh robot --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop vr --input controllers --bringup
 ```
 
-`--bringup` starts a missing Zenoh router and native SH5 follower. The native
-follower performs its existing real initialization motions, including arms,
-fingers, head, lift and steering. Existing services are reused; a mismatched
-description, duplicate controller or missing feedback rejects startup. After a
-new follower starts, the session waits for stable measured ready arms and for
-the native trajectory executors to finish. An existing follower is never moved
-to ready by this wrapper. Without `--bringup`, both services must already run.
+`--bringup` starts a missing Zenoh router and SH5 follower with
+`init_position:=false`. The native hand/head/lift/steering initialization
+trajectories are skipped. Once stable feedback is available, only the two
+seven-joint arms follow the existing xr_tele quintic ready trajectory over five
+seconds, to `[0,0,0,-1.57,0,0,0]` per arm. No hand position trajectory is sent
+by this ready mover. Native driver initialization and the follower's existing
+hand current commands still run; this option does not turn hand torque off.
+This is a startup action, not part of HOLD/resume. An existing follower is
+reused without motion; add `--ready-pose` to the **robot** command to request
+the same arms-only move explicitly. Stop old initialization executors and VR
+controllers first. Motion failure prevents the VR controller from starting.
+Without `--bringup`, router and follower must already run.
 
 The foreground session owns the VR controller and optional Loop streamer. On
 Ctrl+C those processes stop, followed by the router/follower started by this
@@ -31,13 +36,36 @@ session. Tagged launch children are cleaned up even if the launch parent has
 already exited, including hand initialization executors. Already-running
 external services reused by this command are not owned by it. New PID files and logs are under
 `/workspace/ai_worker_xr_sessions/<id>/`. The wrapper never starts a physical
-leader. `--loop off` is the default and starts only the optical hand/arm path.
+leader. `--loop off` is the default and disables recording integration. Input mode is selected separately; `--input hands` remains the default for older commands.
 `--loop-no-camera` on the robot command selects joint/tactile/status streaming only.
 `--dry-run` prints the host command without SSH, ROS, or hardware startup.
 Allow the robot terminal to finish its `[STOP]` messages before closing it.
 
 The local Docker wrapper uses `sg docker` if the account belongs to the Docker
 group but its current shell lacks that group. It does not change socket modes.
+
+## Quest controller mode
+
+Pass `--input controllers` on **both** commands. Controller wrists use the
+existing hardware arm mapping; Body tracking and fresh robot feedback remain
+required. X+A starts/resumes and Y+B requests HOLD. The original SG2 joystick
+axis mapping, deadzones and both-stick-click mode switch are reused: right
+stick controls lift, left stick controls head or mobile motion. No Loop motion
+key grabber runs in this mode; Loop retains its native recording/review keys.
+
+Each side's trigger continuously interpolates from open to grasp (0..1).
+Grip has priority over trigger and interpolates a thumb/index/middle tripod
+pinch; ring and little fingers remain open. Releasing grip returns to trigger
+grasp. Presets in `hx5_controller_poses.json` are URDF-based candidates, not
+physically calibrated contact/force grasps. They do not implement tactile
+force regulation. The final 40 finger targets pass through the existing robot
+gate at 100 Hz with a velocity cap of 85% of each physical URDF limit. Optical
+mode uses the same finger output cap. This reduces speed modestly; it does
+not reduce holding torque or prove thermal protection. HOLD retains measured
+positions rather than disabling torque. Stale controller input stops updates.
+
+For the prior optical hand/Loop keyboard workflow, use `--input hands` on both
+commands. That mode retains C start/HOLD/resume and the V review-key mapping.
 
 ## Recording behavior
 
@@ -65,9 +93,9 @@ move the base/head/lift; continuous observations preserve those events.
 | Group | observation | action |
 |---|---|---|
 | left_arm / right_arm | measured 7 joints each | final gated 7-joint trajectory |
-| left_hand / right_hand | measured 20 joints each | native ROBOTIS retargeted 20-joint trajectory |
-| head | measured 2 joints | gated keyboard trajectory |
-| lift | measured 1 joint | gated keyboard trajectory |
+| left_hand / right_hand | measured 20 joints each | final gated 20-joint trajectory (native retarget or controller grasp) |
+| head | measured 2 joints | gated keyboard/controller trajectory |
+| lift | measured 1 joint | gated keyboard/controller trajectory |
 | mobile | measured odometry vx, vy, wz | gated cmd_vel vx, vy, wz |
 
 ### HX5-D20 fingertip tactile
@@ -142,6 +170,7 @@ the explicit validity/age markers below.
 | action_valid | same group order; arms/hands require ACTIVE, auxiliaries allow manual_active |
 | ages | joint receipt, gate receipt, PC intent receipt in seconds; missing=-1 |
 | clock | age of PC clock anchor, robot-minus-PC wall-clock difference in seconds |
+| controller_inputs | left trigger, left grip, right trigger, right grip (0..1); missing for optical/stale input; retained during HOLD |
 
 Recording freshness is 0.5s and is independent of the longer teleop grace
 period. Status sequence numbers reject repeated/out-of-order heartbeats. HOLD
@@ -162,7 +191,7 @@ repositioning demonstrations; preserve manual_active when those actions matter.
 The original Loop episode remains the full, auditable recording. An exporter
 that edits the existing episodes is not run by these commands.
 
-## Keyboard in the Loop window
+## Keyboard in the Loop window (`--input hands` only)
 
 | Key | Behavior |
 |---|---|
@@ -229,7 +258,7 @@ query from permanently blocking C with HARDWARE_PROFILE_REQUIRED.
 ## Arm cadence and the SG2 / hand paths
 
 The old SG2 controller path has 15 controller coordinates. SH5 hands add 40
-measured finger coordinates (55 total); keyboard control adds 2 measured head
+measured finger coordinates (55 total); keyboard or controller-stick control adds 2 measured head
 and 6 measured wheel coordinates (63 total).
 SH5 arm IK evaluates over 2,200 collision pairs. Native hand retargeting maps
 landmarks directly to finger trajectories and does not solve this arm QP.
@@ -276,3 +305,15 @@ The reference `external_repos/loop` predates the on-robot stereo head JPEG and
 driver-side wrist rotation changes. Its whole package must not replace the
 installed robot package. Loop application binaries and its recording engine
 are not patched; this is an additive source and input bridge.
+
+## Read-only hardware finding (2026-10-23)
+
+With the follower stopped and no owner of `/dev/follower`, board-only READs
+returned Hardware Error Status(71)=64 (0x40) and Bus Watchdog(8)=255
+(signed -1) on right ID110 and left ID140. Input voltages were 28.62V and
+28.48V. The [official hand control table](https://ai.robotis.com/hands/control_table_hands.html)
+identifies these as Bus Watchdog errors after an interruption of TableSync
+communication. They may have occurred when the follower stopped; this reading
+does not establish the cause of earlier in-motion flashing or finger heating.
+No error clear, register WRITE, torque change or physical motion was performed.
+Individual finger motor temperatures and overload flags were not obtained.

@@ -31,7 +31,7 @@ def listening(host,port):
     except OSError:return False
 
 
-def ready(services,started_follower,timeout=120):
+def ready(services,timeout=120):
     import rclpy
     from hardware.capture_snapshot import Snapshot
     rclpy.init(args=[])
@@ -43,14 +43,6 @@ def ready(services,started_follower,timeout=120):
                 if process.poll() is not None:raise RuntimeError(f'{name} failed during initialization')
             rclpy.spin_once(node,timeout_sec=.1)
             if not node.ready():continue
-            if started_follower:
-                if time.monotonic()-began<15:continue
-                expected=[0.,0.,0.,-1.57,0.,0.,0.]
-                if any(abs(node.state.get(f'arm_{side}_joint{i}',1e9)-value)>.1
-                       for side in ('l','r') for i,value in enumerate(expected,1)):continue
-                # Native initializers also move lift, head and fingers. Let their
-                # action clients exit before taking the collision snapshot.
-                if any('joint_trajectory_executor' in Path(a[0]).name for a in processes()):continue
             return {name for name,_ in node.get_node_names_and_namespaces()}
         raise RuntimeError('Follower not ready: '+node.error)
     finally:
@@ -63,9 +55,12 @@ def main():
     p.add_argument('--pc-ip',required=True,type=ipv4)
     p.add_argument('--robot-ip',required=True,type=hostname)
     p.add_argument('--bringup',action='store_true')
+    p.add_argument('--ready-pose',action='store_true')
     p.add_argument('--loop',choices=('off','vr'),default='off')
+    p.add_argument('--input',choices=('hands','controllers'),default='hands')
     p.add_argument('--loop-no-camera',action='store_true')
     args=p.parse_args()
+    os.environ['AI_WORKER_SH5_INPUT']=args.input
     lock=open('/tmp/sh5_vr_session.lock','w')
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise SystemExit('Another SH5 session launcher is running')
@@ -108,20 +103,28 @@ def main():
         os.environ['ZENOH_CONFIG_OVERRIDE']='mode="client";connect/endpoints=["tcp/127.0.0.1:7447"]'
         follower=any(Path(argv[0]).name=='ros2_control_node' for argv in processes())
         if not follower:
-            if not args.bringup:raise RuntimeError('Follower absent; --bringup starts native SH5 ready motion')
-            print('[BRINGUP] Native SH5 follower initializes arms, hands, head, lift and steering.',flush=True)
-            service('follower',['ros2','launch','ffw_bringup','ffw_sh5_follower_ai.launch.py'])
-        print('[WAIT] Fresh stable SH5 feedback and completion of native initialization...',flush=True)
-        nodes=ready(services,not follower)
+            if not args.bringup:raise RuntimeError('Follower absent; --bringup starts SH5 without native initialization, then raises only the arms over five seconds')
+            print('[BRINGUP] SH5 follower init_position:=false; then five-second arms-only ready motion. No hand initialization trajectory.',flush=True)
+            service('follower',['ros2','launch','ffw_bringup','ffw_sh5_follower_ai.launch.py','init_position:=false'])
+        print('[WAIT] Fresh stable SH5 feedback...',flush=True)
+        nodes=ready(services)
         if any('leader' in name.lower() and name.endswith('controller_manager') for name in nodes):
             raise RuntimeError('Physical leader must be stopped for VR mode')
+        if not follower or args.ready_pose:
+            mover=start([sys.executable,'-m','hardware.ready_pose','--model','sh5','--duration','5'])
+            children.append(('arms-only ready',mover))
+            while mover.poll() is None:
+                if any(p.poll() is not None for _,p in services):raise RuntimeError('Follower/router exited during arm ready motion')
+                time.sleep(.1)
+            if mover.returncode:raise RuntimeError('Five-second arm ready motion failed; VR remains stopped')
+            children.remove(('arms-only ready',mover))
         if args.loop=='vr' and not args.loop_no_camera:
             if not {'head_left_jpeg','head_right_jpeg'}&nodes:
                 loader=start(['ros2','launch','ffw_loop_streamer','head_jpeg.launch.py','jpeg_quality:=75'])
                 # A composable-node loader may exit successfully after loading.
                 children.append(('head JPEG loader',loader))
         controller=['bash',str(root/'hardware/run_controller.sh'),'sh5','--hands']
-        if args.loop=='vr':controller.append('--manual-controls')
+        if args.loop=='vr' or args.input=='controllers':controller.append('--manual-controls')
         children.append(('controller',start(controller)))
         if args.loop=='vr':
             loop=[sys.executable,'-m','hardware.loop_vr_streamer','--loop-addr',args.pc_ip+':50051',
