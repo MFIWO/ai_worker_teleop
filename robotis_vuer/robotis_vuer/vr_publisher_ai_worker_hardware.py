@@ -269,13 +269,21 @@ class HardwareXRPublisher(XROverheadPublisher):
             self._controller_fault_latched = True
             self._set_arm_control_enabled(False, 'Cyclo reference fault; X+A requests checked reset')
 
+    def _controller_aux_selected(self):
+        return self.hardware_model == 'sg2'
+
+    def _controller_aux_ready(self, now=None):
+        now = time.monotonic() if now is None else now
+        return (self._controller_aux_selected() and self.hardware_allow_arm and self.arm_control_enabled
+                and self._phase == 'ACTIVE' and not self._controller_fault_latched
+                and bool((self._hardware_manifest or {}).get('auxiliary_limits'))
+                and self._arm_tracking_is_fresh(now)
+                and self._feedback_input_state(now) == 'fresh'
+                and self._tracking_input_state(now) == 'fresh')
+
     def _heartbeat(self):
         self._intent_sequence += 1
-        aux_enabled = (self.hardware_model == 'sg2' and self.hardware_allow_arm and self.arm_control_enabled and
-                       self._phase == 'ACTIVE' and not self._controller_fault_latched and
-                       self._arm_tracking_is_fresh() and
-                       self._feedback_input_state(time.monotonic()) == 'fresh' and
-                       self._tracking_input_state() == 'fresh')
+        aux_enabled = self._controller_aux_ready()
         self._intent_pub.publish(String(data=json.dumps({
             'model': self.hardware_model,
             'enabled': bool(self.hardware_allow_arm and self.arm_control_enabled and
@@ -611,11 +619,7 @@ class HardwareXRPublisher(XROverheadPublisher):
         await super().on_controller_move(event, session)
         self._process_tact_buttons()  # [ADDED] works whether or not the arm is active, like the leader
         with self._xr_lock:
-            if (self.hardware_model != 'sg2' or not self.arm_control_enabled or
-                    self._phase != 'ACTIVE' or not self._arm_tracking_is_fresh() or
-                    self._feedback_input_state(time.monotonic()) != 'fresh' or
-                    self._tracking_input_state() != 'fresh' or
-                    not (self._hardware_manifest or {}).get('auxiliary_limits')):
+            if self.hardware_model != 'sg2' or not self._controller_aux_ready():
                 return
             # The original implementation supplies stick axis swaps, deadzones,
             # both-click mode toggles, rate limits and incremental measured starts.

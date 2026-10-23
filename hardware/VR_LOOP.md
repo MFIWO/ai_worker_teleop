@@ -79,6 +79,16 @@ axis mapping, deadzones and both-stick-click mode switch are reused: right
 stick controls lift, left stick controls head or mobile motion. No Loop motion
 key grabber runs in this mode; Loop retains its native recording/review keys.
 
+The arm hardware heartbeat now admits auxiliary commands for both SG2 and the
+explicit SH5 controller input with a measured auxiliary profile. An old
+SG2-only serialization condition previously dropped SH5 stick targets even
+though their local calculation ran. Mode selection, calculation and heartbeat
+now share the same ACTIVE/tracking/feedback/profile checks. When a stick is
+moved, `[STICK INTENT]` reports the PC target being sent, while `[STICK BLOCKED]`
+reports missing activation, tracking, feedback or profile. These logs are
+rate-limited and do not claim measured motor motion. Both-stick-click mode
+switching also requires ACTIVE, matching the existing control path.
+
 Each side's trigger continuously interpolates from open to grasp (0..1).
 Grip has priority over trigger and interpolates a thumb/index/middle tripod
 pinch; ring and little fingers remain open. Releasing grip returns to trigger
