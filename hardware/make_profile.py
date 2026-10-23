@@ -121,8 +121,9 @@ def main():
         if a.hands:
             from hardware.sh5_hands_model import add_measured_fingers
             urdf, srdf, frozen, pairs = add_measured_fingers(
-                urdf, description_text, a.srdf.read_text(), frozen, measured_head=a.manual_controls)
-            model_report.update(pairs, movable_dof=57 if a.manual_controls else 55, frozen_joint_count=len(frozen),
+                urdf, description_text, a.srdf.read_text(), frozen, measured_head=a.manual_controls,
+                measured_wheels=a.manual_controls)
+            model_report.update(pairs, movable_dof=63 if a.manual_controls else 55, frozen_joint_count=len(frozen),
                 tool_collision_coverage='SH5 geometry from measured finger positions',
                 retained_movable_joints=[j.get('name') for j in ET.fromstring(urdf).findall('joint')
                                         if j.get('type') != 'fixed'])
@@ -166,7 +167,7 @@ def main():
     collision_report = check_initial_pose(paths['urdf'], paths['srdf'], snapshot,
         cfg['vr_controller']['ros__parameters']['collision_safe_distance'],
         enforce_margin=a.readiness_policy == 'strict_torque', measured_fingers=a.hands,
-        measured_head=a.manual_controls)
+        measured_head=a.manual_controls, measured_wheels=a.manual_controls)
     if not collision_report['native_margin_met']:
         print('[COLLISION DIAGNOSTIC] Initial clearance is positive but below the native CBF margin. '
               'The native QP/CBF, startup tracking guard and reference checker remain unchanged; '
@@ -195,6 +196,10 @@ def main():
                                            if j.get('type') not in ('fixed',)]
     manifest['frozen_joints'] = frozen
     manifest['manual_auxiliary'] = bool(a.manual_controls)
+    manifest['live_wheel_feedback'] = bool(a.manual_controls)
+    if a.manual_controls:
+        from hardware.sh5_hands_model import WHEEL_DRIVES
+        manifest['continuous_sensor_joints'] = sorted(WHEEL_DRIVES)
     if a.hands:
         from hardware.sh5_hands_model import HAND_CONTROL, finger_limits
         manifest['hand_control'] = HAND_CONTROL

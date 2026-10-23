@@ -15,7 +15,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Point32
 from robotis_interfaces.msg import HandJoints
-from std_srvs.srv import SetBool, Trigger
+from std_srvs.srv import SetBool
 from std_msgs.msg import String
 from vuer.schemas import Body, Hands, Scene
 
@@ -30,7 +30,14 @@ SIDES = ('left', 'right')
 class SH5HandsHardwarePublisher(HardwareXRPublisher):
     TRACKING_JUMP_POSITION_M = 0.30
     ENFORCE_SHOULDER_STATIONARITY = False
+    SETTLING_SECONDS = 0.0
+    CONTROLLER_ACTIVATION_DELAY = 0.0
+    WARMUP_HOLD_SECONDS = 0.03
+    STOP_SETTLE_SECONDS = 0.10
+    STILL_WINDOW_SECONDS = 0.03
+    POST_STOP_POSE_SECONDS = 0.05
     def __init__(self, start_server=True):
+        self._fast_resume_at = None
         self._operator_keys = set()
         self._operator_rx = -1e9
         self._operator_tick = time.monotonic()
@@ -39,11 +46,6 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self._operator_instance = None
         self._base_profile_dirty = False
         self._base_last_input = -1e9
-        self._recapture_future = None
-        self._recapture_requested = False
-        self._recapture_barrier = None
-        self._recapture_retry_at = -1e9
-        self._recapture_deadline = -1e9
         self._operator_release_required = False
         self._operator_block_log_at = -1e9
         self._loop_controls = os.environ.get('AI_WORKER_LOOP_CONTROLS') == '1'
@@ -60,8 +62,6 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             self.destroy_timer(self._intent_timer)
             self._intent_timer = self.create_timer(.01, self._heartbeat)
             self.create_subscription(String, '/xr_hardware/operator_keys', self._operator_input, 10)
-            self._recapture_client = self.create_client(Trigger, '/xr_hardware/recapture_profile')
-            self.create_timer(.2, self._maybe_recapture)
         if self.hardware_model != "sh5":
             raise ValueError("Optical SH5 hands require --model sh5")
         self._hand_publishers = {side: self.create_publisher(
@@ -92,16 +92,16 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 self._operator_rx = time.monotonic()
                 self._operator_keys = keys if data['focused'] else set()
                 if not keys:self._operator_release_required = False
-                if self._recapture_requested or self._recapture_future is not None or self._operator_release_required:
+                if self._operator_release_required:
                     if self._operator_keys and self._operator_rx-self._operator_block_log_at>=2.:
-                        self.get_logger().warning('[LOOP KEYS BLOCKED] Profile recapture in progress; release motion keys, wait for BASE RECAPTURED, then press again.')
+                        self.get_logger().warning('[LOOP KEYS BLOCKED] Release motion keys before another manual command.')
                         self._operator_block_log_at=self._operator_rx
                     self._operator_keys.clear()
                 if self._operator_keys & {'w', 'a', 's', 'd', 'o', 'p'}:
                     self._base_profile_dirty = True
                     self._base_last_input = self._operator_rx
                     if self.arm_control_enabled:
-                        self._set_arm_control_enabled(False, 'Loop base reposition: hold arms; recapture before resuming')
+                        self._set_arm_control_enabled(False, 'Loop base reposition: hold arms; C reanchors without controller restart')
                     self._phase = 'HOLD'
                 if data['stop']:
                     self._operator_keys.clear()
@@ -119,52 +119,6 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 self._operator_keys.clear()
                 self._operator_rx = -1e9
 
-    def _maybe_recapture(self):
-        with self._xr_lock:
-            if self._recapture_future is not None:
-                if not self._recapture_future.done():
-                    if time.monotonic()>self._recapture_deadline:
-                        self._recapture_future.cancel()
-                        self._recapture_future=None
-                        self._recapture_requested=False
-                        self._operator_release_required=True
-                        self.get_logger().error('[BASE RECAPTURE TIMEOUT] Robot service did not reply; arms stay held. Inspect robot session; release keys before manual controls.')
-                    return
-                try:
-                    response=self._recapture_future.result()
-                    if response.success:
-                        self._base_profile_dirty=False
-                        self.get_logger().info('[BASE RECAPTURED] Fresh collision profile ready; release motion keys, then C to resume arms. Keyboard controls are available.')
-                    else:self.get_logger().error('[BASE RECAPTURE] '+response.message)
-                except Exception as error:self.get_logger().error('[BASE RECAPTURE] '+str(error))
-                self._recapture_future=None
-                self._recapture_requested=False
-                self._operator_release_required=True
-                return
-            # Keep the gate alive for continuous keyboard operation after base
-            # repositioning. Recapture is requested only by an explicit start.
-            if (not self._recapture_requested or not self._base_profile_dirty or self._operator_keys or
-                    time.monotonic()-self._base_last_input < .7 or self.arm_control_enabled):return
-            now=time.monotonic()
-            if now>self._recapture_deadline:
-                self._recapture_requested=False
-                self._operator_release_required=True
-                self.get_logger().error('[BASE RECAPTURE TIMEOUT] No eligible gate/service acknowledgement; keyboard controls unlock after key release. Inspect robot session; C retries, arms stay held.')
-                return
-            if now < self._recapture_retry_at:return
-            gate=self._gate_state or {}
-            barrier=self._recapture_barrier
-            if (now-self._gate_rx>.5 or gate.get('enabled') or gate.get('manual_active') or
-                    barrier and self._gate_instance==barrier[0] and self._gate_status_sequence<=barrier[1]):return
-            if gate.get('fault'):
-                self._recapture_requested=False
-                self.get_logger().error('[BASE RECAPTURE REFUSED] '+str(gate['fault'])+'; inspect/reset this fault before recapture.')
-                return
-            if self._recapture_client.service_is_ready():
-                self._recapture_future=self._recapture_client.call_async(Trigger.Request())
-                self.get_logger().info('[BASE RECAPTURE] Waiting for stable wheels/joints and new collision profile.')
-                self._recapture_retry_at=now+2.
-
     def _heartbeat(self):
         with self._xr_lock:
             super()._heartbeat()
@@ -173,7 +127,6 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         dt, self._operator_tick = now-self._operator_tick, now
         manifest = self._hardware_manifest or {}
         allowed = (self._loop_controls and self.hardware_allow_arm and manifest.get('manual_auxiliary')
-                   and not self._recapture_requested and self._recapture_future is None
                    and now-self._operator_rx <= .3 and self._joint_rx is not None
                    and now-self._joint_rx <= .5 and not self._controller_fault_latched)
         if not allowed or not self._operator_keys:
@@ -183,7 +136,6 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 if self._joint_rx is None or now-self._joint_rx>.5:reasons.append('joint feedback missing/older than 0.5s')
                 if self._controller_fault_latched:reasons.append('controller fault: '+str(self._gate_fault_reason or self._last_reason))
                 if now-self._operator_rx>.3:reasons.append('keyboard input older than 0.3s')
-                if self._recapture_requested or self._recapture_future is not None:reasons.append('profile recapture in progress')
                 self.get_logger().warning('[LOOP KEYS BLOCKED] '+('; '.join(reasons) or 'manual motion not enabled'))
                 self._operator_block_log_at=now
             self._operator_targets.clear()
@@ -303,30 +255,42 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
 
     def _enable_service(self, request, response):
         with self._xr_lock:
+            began = time.monotonic()
             if request.data and self._base_profile_dirty:
-                if not self._recapture_requested and self._recapture_future is None:
-                    self._operator_keys.clear()
-                    self._operator_targets.clear()
-                    self._operator_release_required=True
-                    self._recapture_requested=True
-                    self._recapture_deadline=time.monotonic()+75.
-                    self._recapture_barrier=(self._gate_instance,self._gate_status_sequence)
-                    self._set_arm_control_enabled(False,'C: stop manual controls before base profile recapture')
-                    self._phase='HOLD'
-                    self._heartbeat()
-                    self.get_logger().info('[BASE RECAPTURE REQUESTED] C requested a fresh wheel profile; arms held. Wait for BASE RECAPTURED, then C again.')
-                response.success = False
-                response.message = 'Base/wheel profile recapture requested; wait for BASE RECAPTURED, release keys, then C again.'
-                return response
+                if not (self._hardware_manifest or {}).get('live_wheel_feedback'):
+                    response.success = False
+                    response.message = 'Update robot code/build once for live wheel feedback; no automatic recapture or restart.'
+                    return response
+                gate = self._gate_state or {}
+                if (time.monotonic()-self._base_last_input < .1 or time.monotonic()-self._gate_rx > .5
+                        or gate.get('enabled') or gate.get('manual_active')):
+                    response.success = False
+                    response.message = 'Release base keys and wait for fresh disarmed gate acknowledgement, then C.'
+                    return response
             if request.data and not self._arm_tracking_is_fresh():
                 response.success = False
                 response.message = 'Both hands and body tracking must be fresh.'
                 return response
+            self._fast_resume_at = began if request.data else None
             self._set_arm_control_enabled(request.data, 'manual SH5 enable service')
             self._reset_hand_input()
+            if request.data and self.arm_control_enabled:
+                self._base_profile_dirty = False
+                self.get_logger().info('[BASE REANCHORED] Current measured wrists; controller stayed running, no snapshot/profile rebuild.')
+                # Publish the stationary seed/reactivate in this callback,
+                # rather than adding another 30 Hz frame before startup.
+                self._publish_synced_pose_frame_if_ready()
             response.success = self.arm_control_enabled == request.data
             response.message = f'arm_enabled={self.arm_control_enabled}; phase={self._phase}; {self._last_reason}'
         return response
+
+    def _event(self, tag, message):
+        if tag == 'READY' and self._fast_resume_at is not None:
+            message += f'; C-to-ready={(time.monotonic()-self._fast_resume_at)*1000:.1f}ms'
+            self._fast_resume_at = None
+        elif tag in ('STOP','START_REFUSED'):
+            self._fast_resume_at = None
+        super()._event(tag,message)
 
     async def main_hand_tracking(self, session):
         session.set @ Scene(

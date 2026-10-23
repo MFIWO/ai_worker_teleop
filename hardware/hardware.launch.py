@@ -23,7 +23,8 @@ def generate_launch_description():
     controller = Node(package='cyclo_motion_controller_ros',
                       executable=f'/workspace/{build_root}/build/cyclo_motion_controller_ros/vr_controller_node',
                       name='vr_controller', parameters=[p['config'], {'urdf_path': p['urdf'], 'srdf_path': p['srdf'],
-                      'activation_delay_seconds': 0.1, 'startup_ramp_seconds': 0.1,
+                      'activation_delay_seconds': 0.0 if hands else 0.1,
+                      'startup_ramp_seconds': 0.03 if hands else 0.1,
                       'joint_state_timeout': 50.0}],
                       output='screen')
     checker = Node(package='cyclo_motion_controller_ros', executable='reference_checker_node',

@@ -195,31 +195,42 @@ the installed physical leader's full-stick lift jog: measured position +10mm /
 -10mm at 100Hz, with physical position and gate slew limits. This is a target
 offset, not a fixed lift speed; the former separate 0.04m/s integration is gone.
 
-Keyboard head motion selects an optional 57-scalar-joint collision model:
-14 arms + lift + 40 measured fingers + 2 measured head joints. The native arm
-QP has zero velocity bounds for the fingers/head and consumes their measured
-positions; it does not generate their commands. Existing 55-joint hand profiles
-remain supported. Keyboard head/lift target checks use cached collision FK.
-Possible box contacts caused by these auxiliary targets are refined with the
-hashed original collision meshes. This avoids a known head/body box overlap at
-the measured ready pose. The arm QP keeps its conservative box geometry.
+Loop keyboard mode uses a 63-scalar-joint measured model: 14 arms + lift +
+40 fingers + 2 head + 6 wheels. The arm QP fixes finger/head/wheel velocities
+to zero and refreshes their positions from measured feedback. Continuous wheel
+drive angles are represented modulo 2pi as scalar revolute coordinates; link
+poses match their original continuous rotations. These coordinates generate no
+wheel commands. Existing 55/57-coordinate profiles remain loadable, but moving
+the base and resuming requires the updated live-wheel profile.
 
-Base movement first holds arms, because wheel poses are frozen in the arm
-collision profile. Releasing keys keeps the gate/controller running: keyboard
-base/head/lift controls remain available, with arms held. After repositioning,
-press C to request a fresh profile. The PC first stops manual commands and waits
-for a fresh disarm acknowledgement; only then does the robot restart its own
-controller to collect the profile. Motion keys are blocked during this explicit
-recapture. Loop continues recording. Wait for `[BASE RECAPTURED]`, release motion
-keys and press C again to re-anchor and resume arms. Rejected recaptures now
-report the actual blocking status instead of one generic message. Stale gate or
-missing-service waits time out; they do not queue a later automatic arm start.
-C is a software hold, not physical torque release or a hardware emergency stop.
+C holds/reanchors/resumes within the existing controller process. There is no
+recapture service, disk snapshot, collision model regeneration or process
+restart on C or after base movement. Release motion keys, then press C once.
+A fresh disarmed gate acknowledgement and at least 0.1s after the last base-key
+input are required; a rejected C is not queued for automatic later activation.
+The model and passive initial checks are prepared once when the robot session
+starts. Existing continuous native collision constraints, measured FK and
+physical joint bounds apply during operation. Head/lift keyboard targets use
+the existing auxiliary collision guard.
+
+SH5 startup has zero extra settling/activation delay and a 0.03s native ramp.
+The PC sends stationary measured seed/reactivate immediately from C and waits
+for both arm outputs plus the same 0.03s ramp before tracking human motion.
+At a healthy 30Hz input/goal cadence the target C-to-ready time is about 0.1s;
+this is a configured target, not a measured end-to-end or motor-response
+latency guarantee. Missing tracking/feedback, a fault, or preparing a displaced
+reference seed can take longer or reject the start. C HOLD keeps recording.
+
+Controller parameter queries retry after 3s without a reply. A changed gate
+instance cancels old queries, invalidates the old profile and accepts only
+matching current-query responses. This prevents an unanswered pre-restart
+query from permanently blocking C with HARDWARE_PROFILE_REQUIRED.
 
 ## Arm cadence and the SG2 / hand paths
 
 The old SG2 controller path has 15 controller coordinates. SH5 hands add 40
-measured finger coordinates (55 total); keyboard head control adds another 2.
+measured finger coordinates (55 total); keyboard control adds 2 measured head
+and 6 measured wheel coordinates (63 total).
 SH5 arm IK evaluates over 2,200 collision pairs. Native hand retargeting maps
 landmarks directly to finger trajectories and does not solve this arm QP.
 Both optical hand landmarks and arm goals use best-effort, keep-last-1 streams;

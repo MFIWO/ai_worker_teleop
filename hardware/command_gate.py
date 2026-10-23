@@ -168,6 +168,9 @@ class HardwareCommandGate(Node):
             clean.header = msg.header
             clean.name = list(canonical)
             clean.position = [self.measured[k] for k in canonical]
+            if self.profile.get('live_wheel_feedback'):
+                from hardware.sh5_hands_model import scalar_sensor_position
+                clean.position = [scalar_sensor_position(k,v) for k,v in zip(canonical,clean.position)]
             velocity = dict(zip(msg.name, msg.velocity)) if len(msg.velocity) == len(msg.name) else {}
             clean.velocity = [float(velocity.get(k, 0.)) for k in canonical]
             if all(math.isfinite(v) for v in clean.velocity):
