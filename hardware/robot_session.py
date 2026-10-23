@@ -92,10 +92,13 @@ def main():
     p.add_argument('--ready-pose',action='store_true')
     p.add_argument('--loop',choices=('off','vr'),default='off')
     p.add_argument('--input',choices=('hands','controllers'),default='hands')
+    p.add_argument('--hand-mode',choices=('1','2'),default='1')
     p.add_argument('--loop-no-camera',action='store_true')
     p.add_argument('--host-lease',action='store_true',help=argparse.SUPPRESS)
     args=p.parse_args()
+    if args.hand_mode=='2' and args.input!='controllers':p.error('--hand-mode 2 requires --input controllers')
     os.environ['AI_WORKER_SH5_INPUT']=args.input
+    os.environ['AI_WORKER_SH5_HAND_MODE']=args.hand_mode
     lock=open('/tmp/sh5_vr_session.lock','w')
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise SystemExit('Another SH5 session launcher is running')

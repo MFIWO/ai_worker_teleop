@@ -38,8 +38,10 @@ def main():
     p.add_argument('--robot-ip',required=True,type=hostname)
     p.add_argument('--loop',choices=('off','vr'),default='off')
     p.add_argument('--input',choices=('hands','controllers'),default='hands')
+    p.add_argument('--hand-mode',choices=('1','2'),default='1')
     p.add_argument('--host-lease',action='store_true',help=argparse.SUPPRESS)
     args=p.parse_args()
+    if args.hand_mode=='2' and args.input!='controllers':p.error('--hand-mode 2 requires --input controllers')
     root=Path(__file__).resolve().parents[1]
     cert=root/'robotis_vuer/robotis_vuer'
     subprocess.run([sys.executable,'-m','hardware.vuer_tls','--cert',str(cert/'cert.pem'),
@@ -47,6 +49,7 @@ def main():
     env=os.environ.copy()
     env.pop('ZENOH_CONFIG_OVERRIDE',None)
     env['AI_WORKER_SH5_INPUT']=args.input
+    env['AI_WORKER_SH5_HAND_MODE']=args.hand_mode
     env['AI_WORKER_LOOP_CONTROLS']='1' if args.loop=='vr' and args.input=='hands' else '0'
     processes=[]
     def interrupt(*_):raise KeyboardInterrupt

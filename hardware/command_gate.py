@@ -53,6 +53,9 @@ class HardwareCommandGate(Node):
         self.profile = load_profile(profile_path)
         super().__init__(GATE_NAME)
         self.profile['hand_input'] = os.environ.get('AI_WORKER_SH5_INPUT','hands')
+        self.profile['hand_mode'] = int(os.environ.get('AI_WORKER_SH5_HAND_MODE','1'))
+        if self.profile['hand_mode'] not in (1,2) or (self.profile['hand_mode']==2 and self.profile['hand_input']!='controllers'):
+            raise ValueError('hand mode 2 requires controller input')
         if self.profile['model']=='sh5' and self.profile.get('finger_limits'):
             from hardware.sh5_controller_hands import HAND_SPEED_SCALE
             self.profile['hand_speed_scale'] = HAND_SPEED_SCALE
@@ -234,6 +237,8 @@ class HardwareCommandGate(Node):
                 aux = validate_aux(data.get('manual_aux', {}), self.profile['auxiliary_limits'])
             self.intent_rx = time.monotonic()
             if self.controller_hands and self.profile['hand_input']=='controllers':
+                if type(data.get('hand_mode',1)) is not int or data.get('hand_mode',1)!=self.profile['hand_mode']:
+                    raise ValueError('PC/robot --hand-mode must match')
                 self.controller_hands.receive(data.get('controller_hands'),self.intent_rx)
             elif data.get('controller_hands') is not None:
                 raise ValueError('PC controller input does not match robot hand mode')

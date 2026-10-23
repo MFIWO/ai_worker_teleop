@@ -7,6 +7,7 @@ usage() {
   echo 'Usage: bash run_xr_hardware_pc.sh sg2|sh5 [--start | --arm] [--hands] [--ready-pose | --ready-only] [--server-ip PC_IPv4] [--robot-ip ROBOT_IP_OR_HOSTNAME] [--strict-commissioning]'
   echo '  --hands: SH5 bare wrists + native hand retarget; use sh5 --arm --hands.'
   echo '  --input controllers: SH5 SG2-style Quest controllers, proportional grasp and three-finger pinch.'
+  echo '  --hand-mode 1|2: original trigger/grip (default 1), or button-selected trigger poses (2).'
   echo '  --start: SG2 only; existing ready-pose move, then armed Vuer (manual X+A still required).'
   echo '  --server-ip: PC address used by Quest; validate its TLS certificate before any ready move.'
   echo '  --robot-ip: robot Zenoh router address; this is NOT the Vuer certificate address.'
@@ -27,6 +28,9 @@ while (( $# )); do
     --start) PREPARE_READY=1; export AI_WORKER_XR_ALLOW_ARM=1 ;; # [CHANGED] Explicit motion opt-in.
     --arm) export AI_WORKER_XR_ALLOW_ARM=1 ;;
     --hands) HANDS=1 ;;
+    --hand-mode)
+      [[ "${2:-}" == 1 || "${2:-}" == 2 ]] || { echo '[ERROR] --hand-mode 1|2'; exit 2; }
+      export AI_WORKER_SH5_HAND_MODE="$2"; shift ;;
     --input)
       [[ "${2:-}" == hands || "${2:-}" == controllers ]] || { echo '[ERROR] --input hands|controllers'; exit 2; }
       export AI_WORKER_SH5_INPUT="$2"; HANDS=1; shift ;;
