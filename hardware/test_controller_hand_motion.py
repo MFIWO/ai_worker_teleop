@@ -19,6 +19,55 @@ def controls(pose='angled_grip', trigger=0., grip=0.):
 
 
 class HandMotionTests(unittest.TestCase):
+    def test_session_chords_and_partial_releases_never_select_pose(self):
+        keys={'X':('left','aButton'),'Y':('left','bButton'),
+              'A':('right','aButton'),'B':('right','bButton')}
+        for pair in ('AX','BY'):
+            for first in pair:
+                second=next(b for b in pair if b!=first)
+                for last in pair:
+                    with self.subTest(pair=pair,first=first,last=last):
+                        modes=ControllerHandModes()
+                        modes.selected='point'
+                        for i,pressed in enumerate((first,pair,last,'','','')):
+                            states={'left':{},'right':{}}
+                            for key in pressed:
+                                side,name=keys[key]
+                                states[side][name]=True
+                            self.assertIsNone(modes.buttons(states['left'],states['right'],now=i*.1))
+                        self.assertEqual(modes.selected,'point')
+
+    def test_nonoverlapping_chord_events_cancel_pending_tap(self):
+        modes=ControllerHandModes()
+        modes.selected='point'
+        modes.buttons({'aButton':True},{},now=0.)
+        modes.buttons({},{},now=.01)  # transient all-up before opposite event
+        modes.buttons({},{'aButton':True},now=.08)
+        modes.buttons({},{},now=.1)
+        self.assertIsNone(modes.buttons({},{},now=.4))
+        self.assertEqual(modes.selected,'point')
+
+    def test_single_tap_waits_for_quiet_interval_and_reset_cancels(self):
+        modes=ControllerHandModes()
+        modes.buttons({'bButton':True},{},now=0.)
+        self.assertIsNone(modes.buttons({},{},now=.1))
+        self.assertIsNone(modes.buttons({},{},now=.2))
+        self.assertEqual(modes.buttons({},{},now=.3),('Y','angled_grip'))
+        modes.buttons({},{'bButton':True},now=.4)
+        modes.buttons({},{},now=.5)
+        modes.reset_buttons()
+        self.assertIsNone(modes.buttons({},{},now=1.))
+        self.assertEqual(modes.selected,'angled_grip')
+
+    def test_late_single_button_tail_after_chord_is_ignored(self):
+        modes=ControllerHandModes()
+        modes.buttons({'bButton':True},{'bButton':True},now=0.)
+        modes.buttons({},{},now=.1)
+        modes.buttons({'bButton':True},{},now=.12)
+        modes.buttons({},{},now=.14)
+        self.assertIsNone(modes.buttons({},{},now=.5))
+        self.assertEqual(modes.selected,'full_grip')
+
     def test_c_shape_at_rest_and_proportional_close(self):
         for depth in (0., .01, .25, .5, 1.):
             result = targets(POSES, controls(trigger=depth))
@@ -47,8 +96,9 @@ class HandMotionTests(unittest.TestCase):
     def test_selection_preserves_other_held_hand(self):
         modes=ControllerHandModes()
         modes.controls({'left':dict(trigger=1.,grip=0.),'right':dict(trigger=0.,grip=0.)})
-        modes.buttons({'bButton':True},{})
-        modes.buttons({},{})
+        modes.buttons({'bButton':True},{},now=0.)
+        modes.buttons({},{},now=.01)
+        modes.buttons({},{},now=.2)
         result=modes.controls({'left':dict(trigger=1.,grip=0.),'right':dict(trigger=0.,grip=0.)})
         self.assertEqual(result['left']['pose'],'full_grip')
         self.assertEqual(result['right']['pose'],'angled_grip')
