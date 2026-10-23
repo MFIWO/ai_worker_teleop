@@ -147,6 +147,12 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         return (self._controller_mode and time.monotonic()-self._controller_event_rx <= .3
                 and bool((self._hardware_manifest or {}).get('manual_auxiliary')))
 
+    def publish_right_joystick(self, thumbstick_value):
+        # Leader-style exclusive modes: HEAD has lift; MOBILE has yaw only.
+        # The inherited stick parser still handles axis swaps and mode clicks.
+        if self.joystick_mode:
+            super().publish_right_joystick(thumbstick_value)
+
     def _report_sticks(self, now, allowed):
         active = False
         for side in SIDES:
@@ -248,7 +254,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 if (self._xr_ready and isinstance(data,dict)
                         and all(isinstance(data.get(s+'State'),dict) for s in SIDES)):
                     changed=self._hand_modes.buttons(data['leftState'],data['rightState'])
-                    if changed:self.get_logger().info(f'[HAND POSE] {changed[0]} -> {changed[1]}; applies on each next trigger press, held poses retained')
+                    if changed:self.get_logger().info(f'[HAND POSE] {changed[0]} -> {changed[1]}; released hands adopt selection (Y: C-shaped rest), held poses retained')
                 else:self._hand_modes.reset_buttons()
         await HardwareXRPublisher.on_controller_move(self,event,session)
         with self._xr_lock:
@@ -256,6 +262,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             allowed=self._controller_aux_ready(now)
             if allowed:
                 VRTrajectoryPublisher.process_thumbstick(self)
+                if not self.joystick_mode:self._aux_joints.pop('lift_joint',None)
                 if self._head_target_clamped is not None:self.last_head_command=self._head_target_clamped
                 if 'lift_joint' in self._aux_joints:self.last_lift_command=self._aux_joints['lift_joint']
             self._report_sticks(now,allowed)

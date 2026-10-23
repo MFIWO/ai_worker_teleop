@@ -107,7 +107,9 @@ Add `--hand-mode 2` to **both** host commands (`--input controllers` required):
 | B | pointing: index extended, other fingers curled |
 | A | thumb placed outside first, then four-finger grip |
 
-The button only selects a pending pose; it does not send finger motion.
+The button selects a pose for hands whose triggers are released. Selecting Y
+smoothly forms the C-shaped `angled_prepare` rest pose while ACTIVE, even with
+zero trigger. Hands already holding a trigger retain their captured pose.
 Selection commits when a single button is released. AX start and BY HOLD,
 multiple face buttons, and partial chord releases never select a pose.
 The initial selection is full grip. Each hand captures the pending selection
@@ -115,7 +117,8 @@ when its trigger rises above 0.05, and retains that selection until its trigger
 falls to 0.02 or below. Trigger depth still continuously controls closure.
 For example, tap X and hold the left trigger, then tap B and squeeze the right
 trigger: left retains full grip while right points. Releasing each trigger
-opens that hand; the next press captures the current pending selection.
+returns that hand to the selected rest pose (C shape for Y, open otherwise);
+the next press captures the current pending selection.
 The selected preset remains available after releasing its face button.
 
 Grip remains the same proportional tripod pinch in both modes, independently
@@ -124,11 +127,23 @@ trigger returns to that hand's captured trigger pose. Changing pending modes
 does not change a trigger pose already being held. HOLD clears active captures;
 starting again uses the pending selection.
 
-Y first reaches a bent entry pose; A first positions/extends the thumb outside
-while holding the other fingers. The gate waits for measured preparation
+Y continuously interpolates from the C-shaped rest pose to `angled_grip`
+according to trigger depth. Its closed target uses the original pinch for
+thumb/index/middle; ring/little copy the middle finger's flexion angles while
+retaining their C-rest roll, so they do not turn toward the thumb.
+There is no arrival wait or preparation timeout
+for Y. Mode 2 target changes use a 60ms exponential filter before the existing
+velocity cap; stale inputs and HOLD still stop output through the gate.
+A first positions/extends the thumb outside while holding the other fingers.
+For A the gate waits for measured preparation
 (within 0.1rad, minimum 0.12s) before closure. Failure to reach it within 3s
 raises a gate fault and holds. For A the thumb stays outside while trigger
 scales the other four fingers. The existing velocity cap is applied throughout.
+
+SH5 right-stick functions are exclusive: HEAD mode controls lift with vertical
+stick travel; MOBILE mode controls base yaw with horizontal travel and ignores
+lift input. Both stick clicks toggle modes. Existing axis signs, deadzones,
+left-stick head/base controls and activation checks remain in effect.
 
 HX5-D20 poses in `hx5_controller_poses.json` use 20 joints per side. The G1
 7-joint preset-selection structure and mirrored-hand convention in the local
