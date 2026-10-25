@@ -51,7 +51,7 @@ leader. `--loop off` is the default and disables recording integration. Input mo
 The normal host wrapper sends a stdin lease through non-TTY SSH/docker exec.
 Ctrl+C closes the lease; closing/killing the host terminal or a lost connection
 also ends/expires it on the container side. The robot additionally detects a
-previously connected PC Vuer heartbeat disappearing (1.5s). B+Y/C HOLD and Quest
+previously connected PC Vuer heartbeat disappearing (1.5s). B+Y/V HOLD and Quest
 tracking loss retain intent heartbeats and do **not** trigger torque OFF.
 Terminal disconnect logs are saved to the session's `exit.log` (PC side:
 `/tmp/sh5_pc_session_exit.log`). Allow cleanup to finish before restarting.
@@ -162,7 +162,7 @@ or prove thermal protection. HOLD retains measured positions rather than
 disabling torque. Stale controller input stops updates.
 
 For the prior optical hand/Loop keyboard workflow, use `--input hands` on both
-commands. That mode retains C start/HOLD/resume and the V review-key mapping.
+commands. That mode retains V start/HOLD/resume and the C review-key mapping.
 
 ## Recording behavior
 
@@ -181,7 +181,7 @@ The SDK's `on_select` callback confirms these recording metadata values when
 Preview opens the source. Unsupported robot/hand/action identities are rejected;
 this callback does not initialize, move or reconfigure the physical robot.
 
-**HOLD and C keep the same Loop recording running.** Joint state, latest
+**HOLD and V keep the same Loop recording running.** Joint state, latest
 command values, camera frames and status continue. A held or stale command is
 not relabeled as a fresh demonstration. No observation is copied into action
 to fill a missing message. A paused arm can drift or a keyboard operator can
@@ -226,7 +226,7 @@ the last message, while `fresh` additionally checks receipt age. Receipt Hz
 measures callback arrival, not the hardware sampling clock or sensor health.
 
 The combined source sends the latest raw readings on its existing 30 Hz
-recording clock, alongside joint values, including during C/HOLD. It does not
+recording clock, alongside joint values, including during V/HOLD. It does not
 preserve every upstream frame if the pressure publisher runs faster; header
 stamps, receipt sequence and arrival rate make reuse/downsampling visible.
 Raw pressure is not calibrated Newton force. No baseline subtraction or
@@ -299,19 +299,19 @@ that edits the existing episodes is not run by these commands.
 | arrows up / down | head tilt up / down |
 | arrows left / right | head pan left / right |
 | U / I | lift up / down |
-| C | start / HOLD / resume arms and hands; clear current motion keys; recording continues |
-| V | on Loop review screen: tap = Save Failed; hold = discard, preserving Loop's original C behavior |
+| V | start / HOLD / resume arms and hands; clear current motion keys; recording continues |
+| C | on Loop review screen: tap = Save Failed; hold = discard, preserving Loop's original C behavior |
 | Shift+A or Loop's button | start recording; plain A belongs to base translation in VR mode |
 
 This mode uses X11 passive grabs only on the Loop window. Motion is disabled
 outside that window and on focus loss, modifiers, input expiry or missing
 measured state. Release keys before refocusing. Operate in the Recorder view;
 disable the operator session before typing configuration text with these keys.
-While this bridge runs, plain C is consumed before Loop receives it. V forwards
+While this bridge runs, plain V is consumed before Loop receives it. C forwards
 Loop's original C press/release, including its hold duration. Loop's compiled UI
-still labels these review actions C / Hold C; use V / Hold V in this VR mode.
+still labels these review actions C / Hold C; use C / Hold C in this VR mode.
 The on-screen buttons retain their normal behavior. No recording API is invoked.
-C starts or resumes only with fresh bilateral hand/body tracking and a valid
+V starts or resumes only with fresh bilateral hand/body tracking and a valid
 robot profile. It reanchors to measured wrists and uses the existing startup
 checks; rejected starts are logged, never queued for later automatic activation.
 The bridge owns no follower publishers; all motion passes through the existing
@@ -330,28 +330,28 @@ poses match their original continuous rotations. These coordinates generate no
 wheel commands. Existing 55/57-coordinate profiles remain loadable, but moving
 the base and resuming requires the updated live-wheel profile.
 
-C holds/reanchors/resumes within the existing controller process. There is no
+V holds/reanchors/resumes within the existing controller process. There is no
 recapture service, disk snapshot, collision model regeneration or process
-restart on C or after base movement. Release motion keys, then press C once.
+restart on V or after base movement. Release motion keys, then press V once.
 A fresh disarmed gate acknowledgement and at least 0.1s after the last base-key
-input are required; a rejected C is not queued for automatic later activation.
+input are required; a rejected V is not queued for automatic later activation.
 The model and passive initial checks are prepared once when the robot session
 starts. Existing continuous native collision constraints, measured FK and
 physical joint bounds apply during operation. Head/lift keyboard targets use
 the existing auxiliary collision guard.
 
 SH5 startup has zero extra settling/activation delay and a 0.03s native ramp.
-The PC sends stationary measured seed/reactivate immediately from C and waits
+The PC sends stationary measured seed/reactivate immediately from V and waits
 for both arm outputs plus the same 0.03s ramp before tracking human motion.
-At a healthy 30Hz input/goal cadence the target C-to-ready time is about 0.1s;
+At a healthy 30Hz input/goal cadence the target V-to-ready time is about 0.1s;
 this is a configured target, not a measured end-to-end or motor-response
 latency guarantee. Missing tracking/feedback, a fault, or preparing a displaced
-reference seed can take longer or reject the start. C HOLD keeps recording.
+reference seed can take longer or reject the start. V HOLD keeps recording.
 
 Controller parameter queries retry after 3s without a reply. A changed gate
 instance cancels old queries, invalidates the old profile and accepts only
 matching current-query responses. This prevents an unanswered pre-restart
-query from permanently blocking C with HARDWARE_PROFILE_REQUIRED.
+query from permanently blocking V with HARDWARE_PROFILE_REQUIRED.
 
 ## Arm cadence and the SG2 / hand paths
 
