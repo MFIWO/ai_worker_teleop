@@ -31,8 +31,8 @@ class LoopKeyboard(X11Keys):
         self.window=0
         self.focused=False
         self.armed=False
-        self.c_down=False
-        self.v_down=False
+        self.toggle_down=False
+        self.discard_down=False
 
     def release_grabs(self):
         if self.window:
@@ -65,16 +65,16 @@ class LoopKeyboard(X11Keys):
         focused=bool(self.window and self.active_window()==self.window)
         keys={key for key,code in self.codes.items() if down(code)} if focused else set()
         modified=any(down(code) for code in self.modifiers)
-        toggle='c' in keys and not self.c_down and self.focused and not modified
-        self.c_down='c' in keys
-        discard=focused and not modified and 'v' in keys
-        stop=discard and not self.v_down
-        if discard!=self.v_down:
-            # Preserve Loop's native tap/hold review semantics. C itself is
-            # grabbed above and never delivered to the recording UI.
+        toggle='v' in keys and not self.toggle_down and self.focused and not modified
+        self.toggle_down='v' in keys
+        discard=focused and not modified and 'c' in keys
+        stop=discard and not self.discard_down
+        if discard!=self.discard_down:
+            # Preserve Loop's native C tap/hold review semantics. V is
+            # reserved for live teleop and never reaches the recording UI.
             self.send(self.window if discard else self._discard_window,'c',discard)
             if discard:self._discard_window=self.window
-            self.v_down=discard
+            self.discard_down=discard
         if not focused or not self.focused or stop or toggle or modified:
             self.armed=False
         self.focused=focused
@@ -84,7 +84,7 @@ class LoopKeyboard(X11Keys):
 
     def close(self):
         try:
-            if self.v_down:self.send(self._discard_window,'c',False)
+            if self.discard_down:self.send(self._discard_window,'c',False)
         finally:
             self.release_grabs()
             super().close()
@@ -108,8 +108,8 @@ def main():
                             focused=focused,keys=keys,stop=stop,toggle=toggle))))
     try:
         keyboard=LoopKeyboard()
-        print('[LOOP KEYS] Loop focus: WASD=base; arrows=head; U/I=lift; O/P=yaw; C=start/HOLD/resume. '
-              'Hold V=Loop discard (tap V=save failed on review screen). '
+        print('[LOOP KEYS] Loop focus: WASD=base; arrows=head; U/I=lift; O/P=yaw; V=start/HOLD/resume. '
+              'Hold C=Loop discard (tap C=save failed on review screen). '
               'Shift+A or UI button starts Recorder. Recording continues during HOLD.',flush=True)
         while rclpy.ok():
             event=keyboard.poll()

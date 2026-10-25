@@ -118,7 +118,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                     self._base_profile_dirty = True
                     self._base_last_input = self._operator_rx
                     if self.arm_control_enabled:
-                        self._set_arm_control_enabled(False, 'Loop base reposition: hold arms; C reanchors without controller restart')
+                        self._set_arm_control_enabled(False, 'Loop base reposition: hold arms; V reanchors without controller restart')
                     self._phase = 'HOLD'
                 if data['stop']:
                     self._operator_keys.clear()
@@ -131,7 +131,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                     response = self._enable_service(
                         SetBool.Request(data=not self.arm_control_enabled), SetBool.Response())
                     if not response.success:
-                        self.get_logger().warning('[LOOP C REFUSED] '+response.message)
+                        self.get_logger().warning('[LOOP V REFUSED] '+response.message)
             except (ValueError, KeyError, TypeError):
                 self._operator_keys.clear()
                 self._operator_rx = -1e9
@@ -374,7 +374,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 if (time.monotonic()-self._base_last_input < .1 or time.monotonic()-self._gate_rx > .5
                         or gate.get('enabled') or gate.get('manual_active')):
                     response.success = False
-                    response.message = 'Release base keys and wait for fresh disarmed gate acknowledgement, then C.'
+                    response.message = 'Release base keys and wait for fresh disarmed gate acknowledgement, then V.'
                     return response
             if request.data and not self._arm_tracking_is_fresh():
                 response.success = False
@@ -395,7 +395,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
 
     def _event(self, tag, message):
         if tag == 'READY' and self._fast_resume_at is not None:
-            message += f'; C-to-ready={(time.monotonic()-self._fast_resume_at)*1000:.1f}ms'
+            message += f'; V-to-ready={(time.monotonic()-self._fast_resume_at)*1000:.1f}ms'
             self._fast_resume_at = None
         elif tag in ('STOP','START_REFUSED'):
             self._fast_resume_at = None
