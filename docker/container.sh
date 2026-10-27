@@ -44,7 +44,7 @@ compose_cmd() {
 setup_x11() {
     if [ -n "${DISPLAY:-}" ]; then
         echo "Setting up X11 forwarding..."
-        xhost +local:docker || true
+        bash "${SCRIPT_DIR}/allow_x11.sh" || echo 'Warning: X11 setup failed; GUI access is unavailable.' >&2
     else
         echo "Warning: DISPLAY environment variable is not set. X11 forwarding will not be available."
     fi

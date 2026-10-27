@@ -7,7 +7,7 @@ usage() {
   echo 'Usage: bash run_xr_hardware_pc.sh sg2|sh5 [--start | --arm] [--hands] [--ready-pose | --ready-only] [--server-ip PC_IPv4] [--robot-ip ROBOT_IP_OR_HOSTNAME] [--strict-commissioning]'
   echo '  --hands: SH5 bare wrists + native hand retarget; use sh5 --arm --hands.'
   echo '  --input controllers: SH5 SG2-style Quest controllers, proportional grasp and three-finger pinch.'
-  echo '  --hand-mode 1|2: original trigger/grip (default 1), or button-selected trigger poses (2).'
+  echo '  --hand-mode 1|2: hands: ROBOTIS or xr_ai_teleop HX5 DexPilot; controllers: trigger/grip or button-selected poses.'
   echo '  --start: SG2 only; existing ready-pose move, then armed Vuer (manual X+A still required).'
   echo '  --server-ip: PC address used by Quest; validate its TLS certificate before any ready move.'
   echo '  --robot-ip: robot Zenoh router address; this is NOT the Vuer certificate address.'

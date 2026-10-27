@@ -12,6 +12,7 @@ class NativeHandBoundsTests(unittest.TestCase):
     def setup_hand(self, side):
         hand=SH5HandOutput.__new__(SH5HandOutput)
         hand.native={}
+        hand.active=False
         hand.limits={n:dict(lower=-1.,upper=1.) for n in FINGER_NAMES[side]}
         hand.node=SimpleNamespace(intent_enabled=True,latch=Mock())
         msg=SimpleNamespace(joint_names=list(FINGER_NAMES[side]),

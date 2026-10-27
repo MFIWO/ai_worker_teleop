@@ -41,7 +41,6 @@ def main():
     p.add_argument('--hand-mode',choices=('1','2'),default='1')
     p.add_argument('--host-lease',action='store_true',help=argparse.SUPPRESS)
     args=p.parse_args()
-    if args.hand_mode=='2' and args.input!='controllers':p.error('--hand-mode 2 requires --input controllers')
     root=Path(__file__).resolve().parents[1]
     cert=root/'robotis_vuer/robotis_vuer'
     subprocess.run([sys.executable,'-m','hardware.vuer_tls','--cert',str(cert/'cert.pem'),

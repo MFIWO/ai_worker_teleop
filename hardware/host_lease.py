@@ -8,7 +8,7 @@ import threading
 import time
 
 
-def watch_host(enabled,log):
+def watch_host(enabled,log,*,redirect_output=True):
     if not enabled:return
     def watch():
         last=time.monotonic()
@@ -29,7 +29,7 @@ def watch_host(enabled,log):
                 break
         # A disappeared SSH/terminal output must not interrupt final cleanup.
         try:
-            if not explicit_stop:
+            if not explicit_stop and redirect_output:
                 destination=Path(log)
                 destination.parent.mkdir(parents=True,exist_ok=True)
                 fd=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)

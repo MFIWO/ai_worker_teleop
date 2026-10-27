@@ -1,9 +1,7 @@
 """SH5 terminal-exit hand torque release. Never enables torque or sends positions."""
 import argparse
-import json
 import os
 from pathlib import Path
-import time
 import xml.etree.ElementTree as ET
 
 
@@ -70,11 +68,12 @@ def release(config):
             if comm!=COMM_SUCCESS or error&0x7f:raise RuntimeError(f'ID{ident} write {address}: comm={comm} error={error}')
         for board,motors in config['boards'].items():
             try:
-                # Direct motor access is supported with Direct Control Mode
-                # and TableSync disabled. Never change operating mode here.
-                if read(int(board),33)!=0:raise RuntimeError('hand is not in Direct Control Mode')
+                # Torque OFF must work in either Operating Mode(33), including
+                # Preset(1). Startup separately verifies Direct(0) for teleop.
+                # Disable TableSync and verify every motor's Torque Enable.
                 write(int(board),70,0)
                 if read(int(board),70)!=0:raise RuntimeError('TableSync disable not verified')
+                print(f'[HAND TORQUE OFF] Board {board}: TableSync OFF verified',flush=True)
             except Exception as error:
                 failures.append(str(error));continue
             for ident in motors:
@@ -89,39 +88,11 @@ def release(config):
     print('[HAND TORQUE OFF] Verified 40/40 finger motors',flush=True)
 
 
-def guard():
-    """PC Vuer exit ends the robot session; HOLD still sends intent heartbeats."""
-    import rclpy
-    from rclpy.node import Node
-    from std_msgs.msg import String
-    rclpy.init(args=[])
-    node=Node('sh5_pc_session_guard')
-    last=None
-    def receive(msg):
-        nonlocal last
-        try:
-            data=json.loads(msg.data)
-            if data.get('model')=='sh5':last=time.monotonic()
-        except (ValueError,TypeError):pass
-    sub=node.create_subscription(String,'/xr_hardware/intent',receive,10)
-    try:
-        while rclpy.ok():
-            rclpy.spin_once(node,timeout_sec=.1)
-            if last is not None and time.monotonic()-last>1.5:
-                raise RuntimeError('PC Vuer session heartbeat ended; stop robot session and release fingers')
-    finally:
-        node.destroy_node()
-        if rclpy.ok():rclpy.shutdown()
-
-
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--description',type=Path)
-    p.add_argument('--guard',action='store_true')
+    p.add_argument('--description',type=Path,required=True)
     a=p.parse_args()
-    if a.guard:guard()
-    elif a.description:release(configuration(a.description.read_text()))
-    else:p.error('--description or --guard required')
+    release(configuration(a.description.read_text()))
 
 
 if __name__=='__main__':main()

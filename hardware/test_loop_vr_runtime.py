@@ -65,9 +65,9 @@ class LoopRuntimeTests(unittest.TestCase):
         with patch.object(SourceProducer,'connect',side_effect=connect),patch.object(rclpy,'spin',side_effect=spin),\
              patch('sys.argv',['loop-vr','--loop-addr','unused:50051','--robot-ip','127.0.0.1','--no-camera']):
             main()
-        self.assertEqual(len(schemas),3)
-        self.assertEqual([s.kind.value for s in schemas],['robot','robot','tactile'])
-        self.assertEqual(schemas[2].tactile.name,'HX5-D20')
+        self.assertEqual(len(schemas),2)
+        self.assertEqual([s.kind.value for s in schemas],['robot','robot'])
+        self.assertEqual(schemas[1].robot.name,'HX5-D20')
         self.assertEqual([(f[0],f[1]) for f in frames],[(f[0],f[1]) for f in hand_frames])
         self.assertTrue(all(not any('.left_hand.' in k or '.right_hand.' in k for k in f[2]) for f in frames))
         self.assertTrue(all(not any('.left_arm.' in k or '.mobile.' in k for k in f[2]) for f in hand_frames))

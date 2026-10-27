@@ -555,3 +555,6 @@ __pycache__/
 *.db3
 *.mcap
 *.parquet
+
+# Local robot experiment reports and device metadata
+/hardware/evidence/

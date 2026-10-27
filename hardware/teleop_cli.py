@@ -31,10 +31,11 @@ def parser():
     p.add_argument('--robot-ip',type=hostname,default=os.environ.get('ROBOT_IP'),required='ROBOT_IP' not in os.environ)
     p.add_argument('--loop',choices=('off','vr'),default='off')
     p.add_argument('--input',choices=('hands','controllers'),default='hands')
-    p.add_argument('--hand-mode',choices=('1','2'),default='1',help='controllers: 1=original trigger/grip, 2=button-selected trigger poses; grip pinch in both')
+    p.add_argument('--hand-mode',choices=('1','2'),default='1',help='hands: 1=Cyclo original, 2=xr_ai_teleop HX5 DexPilot; controllers: 1=trigger/grip, 2=button-selected poses')
     p.add_argument('--bringup',action='store_true',help='robot: start missing router/follower without native initialization; raise only arms over five seconds')
     p.add_argument('--ready-pose',action='store_true',help='robot: five-second arms-only ready motion before VR starts')
     p.add_argument('--loop-no-camera',action='store_true')
+    p.add_argument('--hand-trace',action='store_true',help='robot: select the timing-only hand driver; recording starts separately')
     p.add_argument('--dry-run',action='store_true')
     return p
 
@@ -53,19 +54,23 @@ def command(args,interactive):
     if args.bringup:inner.append('--bringup')
     if args.ready_pose:inner.append('--ready-pose')
     if args.loop_no_camera:inner.append('--loop-no-camera')
+    if getattr(args,'hand_trace',False):inner.append('--hand-trace')
     return ['ssh','-T','-o','ServerAliveInterval=2','-o','ServerAliveCountMax=2',f'robotis@{args.robot_ip}',shlex.join(inner)]
 
 
 def main():
     p=parser()
     args=p.parse_args()
-    if args.hand_mode=='2' and args.input!='controllers':p.error('--hand-mode 2 requires --input controllers')
-    if args.side=='pc' and (args.bringup or args.loop_no_camera or args.ready_pose):
-        p.error('--bringup, --ready-pose and --loop-no-camera apply to the robot command')
+    if args.side=='pc' and (args.bringup or args.loop_no_camera or args.ready_pose or args.hand_trace):
+        p.error('--bringup, --ready-pose, --loop-no-camera and --hand-trace apply to the robot command')
     cmd=command(args,sys.stdin.isatty())
     if args.dry_run:
         print(shlex.join(cmd))
         return
+    if args.side=='pc':
+        x11=['bash',str(Path(__file__).resolve().parents[1]/'docker/allow_x11.sh')]
+        if args.loop=='vr' and args.input=='hands':x11.append('--required')
+        subprocess.run(x11,check=True)
     if args.side=='pc' and not os.access('/var/run/docker.sock',os.R_OK|os.W_OK):
         try:member=os.getgid()==grp.getgrnam('docker').gr_gid or os.getlogin() in grp.getgrnam('docker').gr_mem
         except (KeyError,OSError):

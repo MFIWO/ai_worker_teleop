@@ -4,8 +4,9 @@ import os
 from pathlib import Path
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import rclpy
 from sensor_msgs.msg import JointState
@@ -16,7 +17,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from hardware.command_gate import HardwareCommandGate, FEEDBACK_FRESH_SECONDS, FEEDBACK_WAIT_SECONDS
 from hardware.test_hardware_contract import fixture
-from hardware.xr_contract import ARM_NAMES, ARM_DXL_IDS, GOAL_SPEED, load_profile, sha256
+from hardware.xr_contract import ARM_NAMES, ARM_DXL_IDS, GOAL_SPEED, load_profile, sha256, GATE_NAME, PC_NAME
 from hardware.aux_controls import read_aux_limits, AUX_TOPICS
 
 
@@ -76,6 +77,62 @@ class GateTests(unittest.TestCase):
 
     def test_default_is_disarmed(self):
         self.gate.tick();self.assertEqual(self.sent,[])
+
+    def test_stock_optical_mode_never_creates_a_custom_hand_output(self):
+        profile=dict(self.gate.profile,model='sh5',finger_limits={'finger_l_joint1':dict(lower=-1.,upper=1.,velocity=1.)})
+        with patch.dict(os.environ,AI_WORKER_SH5_INPUT='hands',AI_WORKER_SH5_HAND_MODE='1'),\
+             patch('hardware.command_gate.load_profile',return_value=profile),\
+             patch('hardware.sh5_controller_hands.SH5HandOutput') as output:
+            node=HardwareCommandGate(self.path)
+            try:
+                self.assertIsNone(node.controller_hands)
+                output.assert_not_called()
+                self.assertEqual(node.profile['hand_output_policy'],'stock_robotis')
+            finally:node.destroy_node()
+
+    def test_stock_hand_graph_requires_original_retargeter_as_sole_writer(self):
+        from hardware.sh5_controller_hands import HAND_TOPICS
+        self.gate.model='sh5';self.gate.profile['finger_limits']={'finger':{}}
+        hand_writer='retargeting_teleop'
+        def writers(topic):
+            name=(hand_writer if topic in HAND_TOPICS.values() else
+                  PC_NAME if topic=='/xr_hardware/intent' else
+                  'vr_controller' if topic.startswith('/xr_hardware/sh5/') else GATE_NAME)
+            return [SimpleNamespace(node_name=name)]
+        with patch.object(self.gate,'get_publishers_info_by_topic',side_effect=writers),\
+             patch.object(self.gate,'get_node_names_and_namespaces',return_value=[]),\
+             patch.object(self.gate,'count_publishers',return_value=1):
+            HardwareCommandGate.graph(self.gate)
+            hand_writer=GATE_NAME
+            with self.assertRaisesRegex(ValueError,'original ROBOTIS'):
+                HardwareCommandGate.graph(self.gate)
+
+    def test_xr_hand_mode_creates_only_gated_optical_output(self):
+        from hardware.sh5_hands_model import FINGER_NAMES
+        limits={n:dict(lower=-3.14,upper=3.14,velocity=1.) for names in FINGER_NAMES.values() for n in names}
+        profile=dict(self.gate.profile,model='sh5',finger_limits=limits)
+        with patch.dict(os.environ,AI_WORKER_SH5_INPUT='hands',AI_WORKER_SH5_HAND_MODE='2'),\
+             patch('hardware.command_gate.load_profile',return_value=profile):
+            node=HardwareCommandGate(self.path)
+            try:
+                hand=node.controller_hands
+                self.assertEqual(hand.mode,'hands')
+                self.assertEqual(node.profile['hand_output_policy'],'xr_ai_dexpilot')
+                hand.publish=Mock()
+                node.intent_enabled=True
+                names=FINGER_NAMES['left']
+                msg=JointTrajectory(joint_names=list(names),points=[JointTrajectoryPoint(positions=[.2]*20)])
+                hand.native_trajectory('left',msg)
+                hand.publish.assert_not_called()
+                hand.update_authority(dict.fromkeys(limits,0.),time.monotonic(),True)
+                hand.publish.assert_not_called()  # enabling never replays a cached goal
+                hand.native_trajectory('left',msg)
+                self.assertEqual(set(hand.publish.call_args.args[0]),set(names))
+                hand.hold(dict.fromkeys(limits,0.),True)
+                calls=hand.publish.call_count
+                hand.native_trajectory('left',msg)
+                self.assertEqual(hand.publish.call_count,calls)
+            finally:node.destroy_node()
 
     def test_manual_keyboard_while_arms_held_expires_without_forwarding_arms(self):
         gate=self.gate
@@ -184,6 +241,65 @@ class GateTests(unittest.TestCase):
         self.assertIn('lease expired',self.gate.fault)
         self.assertFalse(self.gate.output_active)
         self.assertEqual(self.sent[-1],self.gate.measured)
+
+    def test_sh5_pc_restart_holds_without_fault_and_requires_disarmed_reconnect(self):
+        self.start()
+        self.gate.model='sh5'
+        self.gate.intent_rx=time.monotonic()-1.6
+        self.gate.tick()
+        self.assertIsNone(self.gate.fault)
+        self.assertFalse(self.gate.intent_enabled)
+        self.assertFalse(self.gate.output_active)
+        self.assertEqual(self.sent[-1],self.gate.measured)
+        self.assertTrue(self.gate.pc_reconnect_disarm_required)
+        def send(session,seq,enabled):
+            self.gate.intent(String(data=json.dumps(dict(model='sh5',session_id=session,
+                sequence=seq,enabled=enabled))))
+        # A delayed enabled packet from the old process cannot auto-resume.
+        send('fixture',100,True)
+        self.assertFalse(self.gate.intent_enabled)
+        send('restarted-vuer',1,False)
+        self.assertFalse(self.gate.intent_enabled)
+        self.assertFalse(self.gate.pc_reconnect_disarm_required)
+        send('restarted-vuer',2,True)
+        self.assertTrue(self.gate.intent_enabled)
+        self.assertIsNone(self.gate.fault)
+
+    def test_direct_hand_uses_global_authority_without_extra_hand_age_gate(self):
+        self.start()
+        hand=SimpleNamespace(mode='controllers',direct_output=True,tick=Mock(),hold=Mock())
+        self.gate.controller_hands=hand
+        now=time.monotonic()
+        self.gate.intent_rx=now-.4
+        self.gate.measured_rx=self.gate.motor_rx=now-.6
+        self.gate.tick()
+        self.assertTrue(hand.tick.call_args.args[2])
+        hand.direct_output=False
+        self.gate.tick()
+        self.assertFalse(hand.tick.call_args.args[2])
+        hand.direct_output=True
+        self.gate.intent_rx=time.monotonic()-FEEDBACK_WAIT_SECONDS-.1
+        self.gate.tick()
+        self.assertFalse(hand.tick.call_args.args[2])
+        hand.hold.assert_called()
+        self.assertIn('lease expired',self.gate.fault)
+
+    def test_optical_hand_does_not_enter_timer_output_loop(self):
+        self.start()
+        hand=SimpleNamespace(mode='hands',direct_output=True,active=False,
+                             tick=Mock(),hold=Mock())
+        def authority(measured,now,allowed):hand.active=allowed
+        hand.update_authority=Mock(side_effect=authority)
+        self.gate.controller_hands=hand
+        for _ in range(100):self.gate.update_hand_output(time.monotonic())
+        hand.tick.assert_not_called()
+        hand.update_authority.assert_called_once()
+        self.assertTrue(hand.active)
+        self.gate.intent_enabled=False
+        for _ in range(100):self.gate.update_hand_output(time.monotonic())
+        self.assertEqual(hand.update_authority.call_count,2)
+        self.assertFalse(hand.active)
+        hand.tick.assert_not_called()
 
     def test_short_pc_intent_gap_holds_and_resumes(self):
         self.start()

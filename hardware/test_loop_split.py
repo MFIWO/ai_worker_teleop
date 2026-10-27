@@ -1,4 +1,4 @@
-"""Verify typed source separation without ROS, network, or motors."""
+"""Verify robot/hand source separation without ROS, network, or motors."""
 import sys
 import types
 import unittest
@@ -8,7 +8,7 @@ from hardware.loop_clock import PCRecordingClock, SplitRobotStreamer
 
 
 class SplitSourceTests(unittest.TestCase):
-    def test_installed_sdk_schemas_and_tactile_encoding(self):
+    def test_installed_sdk_schemas_include_pressure_in_hand(self):
         try:
             import loop_sdk
         except ImportError:
@@ -25,14 +25,15 @@ class SplitSourceTests(unittest.TestCase):
             return Producer()
         infos = [types.SimpleNamespace(key='ffw_sh5_vr.observation.'+part+'.joint_position',
                  label=part, unit='rad', group=part) for part in ('left_arm', 'left_hand')]
+        infos.append(types.SimpleNamespace(key='ffw_sh5_vr.observation.left_hand.tactile_pressure',
+            label='pressure', unit='raw', group='left_hand'))
         sender = SplitRobotStreamer('unused', types.SimpleNamespace(channel_infos=lambda:infos), PCRecordingClock())
         with patch.object(loop_sdk.SourceProducer, 'connect', side_effect=connect):
             sender.connect()
-        self.assertEqual([schema.kind.value for schema in schemas], ['robot', 'robot', 'tactile'])
-        self.assertEqual(schemas[2].tactile.channels[0].sample_count, 45)
-        self.assertEqual(schemas[2].tactile.name, 'HX5-D20')
-        sender.streams[2].send({'ffw_sh5_vr.observation.left_hand.tactile_pressure': [255]*45}, stamp=123)
-        self.assertEqual(sender.streams[2].producer.frame.channels[0].raw, bytes([255]*45))
+        self.assertEqual([schema.kind.value for schema in schemas], ['robot', 'robot'])
+        self.assertEqual(schemas[1].robot.name, 'HX5-D20')
+        self.assertIn('ffw_sh5_vr.observation.left_hand.tactile_pressure',
+                      [c.key for c in schemas[1].robot.channels])
         sender.close()
 
     def test_synchronized_sources_and_no_cross_component_pressure(self):
@@ -44,7 +45,7 @@ class SplitSourceTests(unittest.TestCase):
             def send_robot(self, *args):self.frames.append(args)
             def send_tactile(self, *args):self.frames.append(args)
         for stream in sender.streams:stream.producer = Producer()
-        robot, hand, tactile = sender.streams
+        robot, hand = sender.streams
         prefix = 'ffw_sh5_vr.'
         payload = {
             prefix+'observation.left_arm.joint_position': [1.]*7,
@@ -64,10 +65,10 @@ class SplitSourceTests(unittest.TestCase):
         self.assertFalse(any('.left_hand.' in k for k in frames[0][2]))
         self.assertIn(prefix+'observation.left_hand.joint_position', frames[1][2])
         self.assertFalse(any('.mobile.' in k or '.left_arm.' in k for k in frames[1][2]))
-        self.assertFalse(any(k.endswith('.tactile_pressure') for f in frames[:2] for k in f[2]))
-        self.assertEqual(len(frames[2][2]), 1)
-        self.assertEqual(frames[2][2][0].raw, bytes(range(45)))
-        self.assertEqual(frames[2][2][0].key, 'left_hand')
+        self.assertEqual(len(frames), 2)
+        self.assertFalse(any(k.endswith('.tactile_pressure') for k in frames[0][2]))
+        self.assertEqual(frames[1][2][prefix+'observation.left_hand.tactile_pressure'], list(range(45)))
+        self.assertIsNone(frames[1][2][prefix+'observation.right_hand.tactile_pressure'])
         self.assertEqual(frames[0][2][prefix+'teleop.flags'], frames[1][2][prefix+'teleop.flags'])
 
     def test_no_clock_no_samples_and_partial_connect_cleanup(self):

@@ -19,6 +19,77 @@ def controls(pose='angled_grip', trigger=0., grip=0.):
 
 
 class HandMotionTests(unittest.TestCase):
+    def test_native_results_relay_immediately_per_side_and_stop_on_hold(self):
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.mode,hand.hand_mode='hands',1
+        measured={n:0. for names in FINGER_NAMES.values() for n in names}
+        hand.limits={n:dict(lower=-1.,upper=1.,velocity=.001) for n in measured}
+        hand.previous,hand.preparing,hand.native={},{},{}
+        hand.active,hand.last_output=False,0.
+        hand.publish=Mock()
+        hand.node=SimpleNamespace(measured_rx=10.,intent_enabled=True,fault=None,latch=Mock())
+        names=FINGER_NAMES['left']
+        msg=SimpleNamespace(joint_names=list(names),points=[SimpleNamespace(positions=[.8]*20)])
+        hand.native_trajectory('left',msg)
+        hand.publish.assert_not_called()  # global teleop still disarmed
+        hand.update_authority(measured,10.,True)
+        hand.publish.assert_not_called()  # no resampling/replay by timer
+        hand.native_trajectory('left',msg)
+        self.assertEqual(hand.publish.call_args.args[0],dict.fromkeys(names,.8))
+        self.assertNotIn('right',hand.native)  # never wait for the opposite hand
+        count=hand.publish.call_count
+        hand.update_authority(measured,100.,True)  # no hand-specific age watchdog
+        self.assertEqual(hand.publish.call_count,count)
+        hand.node.measured_rx=100.
+        hand.update_authority(measured,100.,False)
+        self.assertFalse(hand.active)
+        self.assertEqual(hand.publish.call_args.args[0],measured)
+        count=hand.publish.call_count
+        hand.native_trajectory('left',msg)
+        self.assertEqual(hand.publish.call_count,count)
+        hand.node.latch.assert_not_called()
+
+    def test_optical_hand_timer_output_is_rejected(self):
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.mode='hands'
+        hand.publish=Mock()
+        with self.assertRaisesRegex(ValueError,'never on timer ticks'):
+            hand.tick({},1.,True)
+        hand.publish.assert_not_called()
+
+    def test_mode2_direct_targets_ignore_slew_and_hand_age_but_obey_global_hold(self):
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.mode,hand.hand_mode,hand.poses='controllers',2,POSES
+        measured={n:0. for names in FINGER_NAMES.values() for n in names}
+        hand.limits={n:dict(lower=-4.,upper=4.,velocity=.001) for n in measured}
+        hand.previous,hand.preparing={},{}
+        hand.active,hand.last_output=False,0.
+        hand.node=SimpleNamespace(measured_rx=10.)
+        hand.publish=Mock()
+        hand.controls=controls('full_grip',trigger=.8)
+        hand.rx=0.
+        hand.tick(measured,10.,True)
+        self.assertEqual(hand.publish.call_args.args[0],targets(POSES,hand.controls))
+        hand.tick(measured,10.,False)
+        self.assertFalse(hand.active)
+        self.assertEqual(hand.publish.call_args.args[0],measured)
+
+    def test_mode1_keeps_existing_velocity_limit_and_hand_timeout(self):
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.mode,hand.hand_mode,hand.poses='controllers',1,POSES
+        measured={n:0. for names in FINGER_NAMES.values() for n in names}
+        hand.limits={n:dict(lower=-4.,upper=4.,velocity=.1) for n in measured}
+        hand.previous,hand.preparing={},{}
+        hand.active,hand.last_output=False,0.
+        hand.node=SimpleNamespace(measured_rx=1.)
+        hand.publish=Mock()
+        hand.controls={s:dict(trigger=1.,grip=0.) for s in FINGER_NAMES}
+        hand.rx=1.
+        hand.tick(measured,1.,True)
+        self.assertTrue(all(abs(v)<=.00100001 for v in hand.publish.call_args.args[0].values()))
+        hand.tick(measured,1.4,True)
+        self.assertFalse(hand.active)
+
     def test_session_chords_and_partial_releases_never_select_pose(self):
         keys={'X':('left','aButton'),'Y':('left','bButton'),
               'A':('right','aButton'),'B':('right','bButton')}
@@ -102,34 +173,6 @@ class HandMotionTests(unittest.TestCase):
         result=modes.controls({'left':dict(trigger=1.,grip=0.),'right':dict(trigger=0.,grip=0.)})
         self.assertEqual(result['left']['pose'],'full_grip')
         self.assertEqual(result['right']['pose'],'angled_grip')
-
-    def test_continuous_c_motion_release_and_stale_hold(self):
-        hand=SH5HandOutput.__new__(SH5HandOutput)
-        hand.mode,hand.hand_mode,hand.poses='controllers',2,POSES
-        measured={n:a for s,names in FINGER_NAMES.items() for n,a in zip(names,POSES[s]['open'])}
-        hand.limits={n:dict(lower=-4.,upper=4.,velocity=1.) for n in measured}
-        hand.previous,hand.filtered,hand.preparing={},{},{}
-        hand.active,hand.last_output=False,0.
-        hand.node=SimpleNamespace(measured_rx=0.)
-        hand.publish=Mock()
-        last=dict(measured)
-        for i in range(1,501):
-            now=i*.01
-            hand.controls=controls(trigger=0. if i<100 or i>=300 else (i-100)/200.)
-            hand.rx=now
-            hand.tick(measured,now,True)
-            output=hand.publish.call_args.args[0]
-            for n in output:
-                self.assertLessEqual(abs(output[n]-last[n]),.01000001)
-            measured,last=dict(output),dict(output)
-        self.assertFalse(hand.preparing)  # no arrival gate / 3s timeout for C grip
-        for s,names in FINGER_NAMES.items():
-            for n,a in zip(names,POSES[s]['angled_prepare']):
-                self.assertAlmostEqual(last[n],a,places=5)
-        hand.node.measured_rx=5.4
-        hand.tick(measured,5.4,True)
-        self.assertFalse(hand.active)
-        self.assertFalse(hand.filtered)
 
     def test_sh5_lift_only_in_head_mode(self):
         path=ROOT/'robotis_vuer/robotis_vuer/vr_publisher_sh5_hands_hardware.py'

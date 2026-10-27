@@ -36,8 +36,6 @@ class ClockedRobotStreamer:
         self.component=component
 
     def owns_channel(self, key):
-        if key.endswith('.tactile_pressure'):
-            return False  # raw pressure belongs to a TACTILE source
         if self.component == 'hand' and key.endswith(('.flags', '.phase', '.clock', '.ages')):
             return True
         parts = key.split('.')
@@ -60,7 +58,7 @@ class ClockedRobotStreamer:
         from loop_sdk import ChannelSpec,RobotConfigOptions,RobotStreamSchema,SourceSchema,SourceProducer
         hand = self.component == 'hand'
         schema=SourceSchema(robot=RobotStreamSchema(source_key='robotis-vr-sh5-hand' if hand else 'robotis-vr-sh5',
-            name='AI Worker Hand / '+HAND_MODEL if hand else 'aiworker',
+            name=HAND_MODEL if hand else 'aiworker',
             channels=tuple(ChannelSpec(key=i.key,label=i.label,unit=i.unit,group=i.group,
                                       range=(0.,255.) if i.key.endswith('.tactile_pressure') else None)
                            for i in self.mapper.channel_infos() if self.owns_channel(i.key)),
@@ -93,7 +91,7 @@ class SplitRobotStreamer:
     def __init__(self, loop_addr, mapper, clock):
         self.clock = clock
         self.streams = tuple(ClockedRobotStreamer(loop_addr, mapper, clock, component=part)
-                             for part in ('robot', 'hand')) + (ClockedTactileStreamer(loop_addr),)
+                             for part in ('robot', 'hand'))
 
     @property
     def sent_count(self):
@@ -114,42 +112,3 @@ class SplitRobotStreamer:
 
     def close(self):
         for stream in self.streams:stream.close()
-
-
-class ClockedTactileStreamer:
-    """Publish measured fingertip pressure on the SDK's typed tactile lane."""
-    def __init__(self, loop_addr):
-        self.loop_addr = loop_addr
-        self.producer = None
-        self.sent_count = 0
-
-    def connect(self):
-        from loop_sdk import SourceProducer, SourceSchema, TactileStreamSchema, TactileChannelSpec
-        schema = SourceSchema(tactile=TactileStreamSchema(
-            source_key='robotis-vr-sh5-tactile', name=HAND_MODEL,
-            channels=tuple(TactileChannelSpec(key=side+'_hand',
-                label=side+' fingers 1..5, row-major 3x3, raw 0..255',
-                sample_format='uint8', sample_count=45) for side in ('left', 'right'))))
-        self.producer = SourceProducer.connect(self.loop_addr, schema)
-        deadline = time.monotonic()+5
-        while time.monotonic() < deadline:
-            if self.producer.stats().connected:return
-            time.sleep(.1)
-        self.close()
-        raise ConnectionError('Loop tactile Source Bus did not connect')
-
-    def send(self, payload, *, stamp):
-        from loop_sdk import TactileChannelValue
-        channels = []
-        for side in ('left', 'right'):
-            values = payload.get(f'ffw_sh5_vr.observation.{side}_hand.tactile_pressure')
-            if values is not None:
-                channels.append(TactileChannelValue(key=side+'_hand', raw=bytes(values)))
-        # Missing pressure is omitted, never represented by fabricated zeros.
-        if channels:self.producer.send_tactile(stamp, self.sent_count, tuple(channels))
-        self.sent_count += 1
-
-    def close(self):
-        if self.producer is not None:
-            self.producer.close()
-            self.producer = None

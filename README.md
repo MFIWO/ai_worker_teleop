@@ -1,100 +1,99 @@
 # AI Worker SH5 VR · Loop integration
 
-이 `main` 브랜치는 **SH5 팔·손 통합 VR Teleop과 Loop 녹화·키보드 연동**을
-다른 PC/AI Worker에 함께 배포하는 통합판입니다. `robotis-applications` 브랜치는
-같은 기반의 팔·손 Teleop 중심 안내를 제공합니다. Main에도 PC 컨테이너 구성과
-Teleop 코드가 포함되므로 새 PC에는 이 브랜치 하나를 clone하면 됩니다.
+SH5 팔·손 VR Teleop과 Loop 녹화를 함께 배포하는 `main` 브랜치입니다.
+실행 명령과 다른 PC의 설치·업데이트 절차는
+[ai_worker_hand.txt](docs/ai_worker_hand.txt)에 있습니다.
+문서 위쪽에는 실행 명령, 아래쪽에는 디버깅과 설정·업데이트 명령을 모았습니다.
 
-## 설치와 업데이트
+## 실행
 
-```bash
-mkdir -p ~/Downloads/external_repos
-cd ~/Downloads/external_repos
-git clone --branch main --single-branch \
-  https://github.com/MFIWO/ai_worker_teleop.git ai_worker_teleop_deploy
-cd ai_worker_teleop_deploy
-```
-
-Docker Engine/Compose v2를 준비한 PC에서:
-
-```bash
-bash docker/container.sh start
-bash hardware/install_pc.sh
-```
-
-PC IP 인증서 생성, 로봇으로 rsync, 소스 설치와 SH5 별도 빌드까지의 전체 명령:
-[ai_worker_hand.txt](docs/ai_worker_hand.txt).
-
-이미 받은 PC는 해당 폴더에서 `git pull --ff-only origin main` 후 같은 문서의
-PC 설치와 로봇 배포 단계를 반복하세요. 로봇에 인터넷이 없어도 PC에서 rsync로
-적용할 수 있습니다. 설치는 기존 ROS Jazzy·Cyclo·SH5 follower/손 retarget 환경을
-사용합니다. Loop 모드에는 로봇의 `ffw_loop_streamer`·`loop_sdk`와 PC Loop가 필요합니다.
-
-## 실행 — PC 터미널 두 개
-
-현재 주소 예시는 PC `192.168.5.2`, 로봇 `192.168.5.101`입니다.
-**PC에서 Loop 앱을 먼저 열고** 실제 장비 주소에 맞춰 실행하세요.
+PC 호스트의 터미널 두 개에서 실행합니다. 예시 주소는 PC `192.0.2.10`,
+로봇 `192.0.2.20`은 문서용 예시이므로 실제 IP로 바꾸세요. `--loop vr`이면 PC에서 Loop 앱을 먼저 여세요.
 
 터미널 1:
 
 ```bash
 bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh robot \
-  --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop vr --bringup
+  --pc-ip 192.0.2.10 --robot-ip 192.0.2.20 \
+  --loop vr --input hands --hand-mode 1 --bringup
 ```
 
 터미널 2:
 
 ```bash
 bash ~/Downloads/external_repos/ai_worker_teleop_deploy/teleop.sh pc \
-  --pc-ip 192.168.5.2 --robot-ip 192.168.5.101 --loop vr
+  --pc-ip 192.0.2.10 --robot-ip 192.0.2.20 \
+  --loop vr --input hands --hand-mode 1
 ```
 
-`--bringup`은 follower가 없으면 기존 SH5 초기화 동작을 실행합니다. PC를 먼저
-실행해도 로봇의 Zenoh 포트를 최대 120초 기다립니다. Quest 접속 주소:
+Quest 접속: `https://192.0.2.10:8012?ws=wss://192.0.2.10:8012`.
+두 명령의 input과 hand-mode를 같게 설정하세요. Loop 없이 사용하려면 둘 다
+`--loop off`로 바꿉니다. `--bringup`은 follower가 없으면 시작하고 팔만 5초 동안
+준비 자세로 이동합니다. 손 초기화 궤적은 보내지 않습니다.
 
-```text
-https://192.168.5.2:8012?ws=wss://192.168.5.2:8012
-```
+| 입력 | mode 1 | mode 2 |
+|---|---|---|
+| `--input hands` | 설치된 Cyclo 원본 solver/filter | xr_ai_teleop HX5 DexPilot, 엄지 MCP/IP 굽힘 반영 |
+| `--input controllers` | Trigger grasp / Grip pinch, 속도 제한 | 버튼으로 포즈 선택 + 각 Trigger 비례 동작 |
 
-Loop에서 source `robotis-vr-sh5` / robot type `ffw_sh5_vr`를 선택합니다.
-녹화 시작/저장은 Loop에서 별도로 조작합니다.
+맨손 입력은 HAND_MOVE에서 좌우 독립으로 즉시 처리합니다. mode 2는 최신 샘플을
+사용하고, 엄지 joint3/4를 추적 굽힘으로 고정한 18관절 최적화를 수행합니다.
+광학 손 mode 1/2에는 컨트롤러 mode 1의 0.85 속도 제한을 적용하지 않습니다.
+**관찰된 손 통신 지연은 아직 해결되지 않았습니다.**
 
-## Loop 창의 키보드 조작
+## Loop와 종료
+
+Loop에서 로봇 소스 `aiworker`와 손 소스 `HX5-D20`를 선택합니다.
+관절과 손 압력은 동기화된 두 소스에 기록됩니다. 이전에 등록한 통합 소스나
+별도 tactile 소스는 새 설정에서 제외하세요.
+
+맨손 + Loop의 키는 Loop 창에 포커스가 있을 때 동작합니다.
 
 | 키 | 동작 |
 |---|---|
-| C | 팔·손 시작 / HOLD / 재개 |
-| WASD | mobile 전후좌우 |
-| O / P | 왼쪽 / 오른쪽 회전 |
-| 방향키 | 목 tilt / pan |
-| U / I | lift 상승 / 하강: leader와 같은 실측 위치 ±10mm jog, 100Hz |
-| Shift+A 또는 UI | Loop 녹화 시작; 검토 화면에서는 Loop의 기존 기능 |
-| V 짧게 / 길게 | Loop 검토 화면에서 실패 저장 / 폐기 |
+| V | 팔·손 시작 / HOLD / 재개 |
+| WASD / O·P | mobile 이동 / 회전 |
+| 방향키 / U·I | 목 / lift |
+| Shift+A 또는 UI | Loop 녹화 시작 |
+| C 짧게 / 길게 | Loop 검토에서 실패 저장 / 폐기 |
 
-C HOLD에서도 같은 에피소드의 영상·데이터는 계속 기록하며 `paused`와
-`action_valid` 상태가 남습니다. V는 Loop의 기존 C 기능을 전달하므로 UI의
-C/Hold C 안내 문구는 그대로입니다. Loop 창에 포커스가 있어야 키가 작동합니다.
+베이스 이동 후 이동 키를 놓고 V 한 번으로 재앵커·재개합니다.
+컨트롤러 입력에서는 A+X로 시작·재개하고 B+Y로 HOLD합니다.
+HOLD 중에도 Loop 기록은 계속되며 paused/action_valid를 남깁니다.
 
-베이스를 움직이면 팔은 HOLD되고 키보드 제어는 계속 사용할 수 있습니다.
-이동을 마친 뒤 C로 프로필 갱신을 요청하고, `[BASE RECAPTURED]` 이후 키를 놓고
-C를 다시 눌러 팔을 재개하세요. 갱신 중에는 키보드 동작이 잠시 차단됩니다.
+PC 터미널 종료는 HOLD 후 로봇 세션을 유지합니다. 로봇 터미널을 종료하면
+명령을 중단하고 최소 3초 후 follower를 정리한 다음 손 모터 40개의 토크 OFF를
+확인합니다. `[HAND TORQUE OFF] Verified 40/40 finger motors`까지 기다리세요.
 
-## 종료
+## 다른 PC에서 업데이트
 
-두 Teleop 터미널에서 Ctrl+C를 누르고 robot session의 `[STOP]` 정리를 기다립니다.
-이 세션이 시작한 follower/router와 launch 자식·손 초기화 executor도 정리합니다.
-이미 외부에서 실행되어 재사용한 서비스는 소유 대상이 아닙니다. 이전 버전이
-남긴 프로세스의 확인·일회 정리 방법도 [배포 안내](docs/ai_worker_hand.txt)에 있습니다.
+양쪽 teleop을 종료한 뒤 기존 clone에서 실행합니다.
 
-로봇 host에는 `ros2`가 없을 수 있습니다. `docker exec ai_worker ...`로 들어가
-`/opt/ros/jazzy/setup.bash`, `/root/ros2_ws/install/setup.bash`를 source해야 합니다.
+```bash
+cd ~/Downloads/external_repos/ai_worker_teleop_deploy
+git switch main
+git pull --ff-only origin main
+bash hardware/install_pc.sh
+```
 
-## 구성과 측정
+이후 [실행 문서 맨 아래](docs/ai_worker_hand.txt)의 **PC에서 로봇으로 배포**
+명령을 실행해야 로봇 컨테이너도 갱신됩니다. 로컬 변경 때문에 pull이 거절되면
+해당 변경을 먼저 보존하세요. 새 PC에는 같은 문서의 최초 설치·인증서 생성도
+필요합니다. 기존 ROS Jazzy·Cyclo·SH5 모델/드라이버 환경을 사용하며,
+Loop 모드에는 로봇의 ffw_loop_streamer·loop_sdk와 PC Loop가 필요합니다.
 
-- [VR Loop 설계·기록 채널·팔 계산 주기](hardware/VR_LOOP.md)
-- 별도 SH5 sparse QP 빌드는 원본 Cyclo와 underlay를 덮어쓰지 않습니다.
-- 저장 자세를 사용한 격리 측정에서 팔 출력은 기존 약 17.4Hz에서 100Hz로 개선됐습니다.
-  실제 VR·카메라 부하에서의 전체 지연을 보장하는 수치는 아닙니다.
-- 기존 main의 [SG2/backport 안내](docs/LEGACY_MAIN_README.md), `files/`, `original/`,
-  `loop/` 참고 자료는 보존했습니다. 현재 SH5 설치는 `hardware/` 경로를 사용하며
-  오래된 `loop/ffw_loop_streamer`로 로봇의 설치 패키지를 덮어쓰지 않습니다.
+`teleop.sh pc`와 `docker/container.sh start/enter`는 현재 데스크톱의
+`xhost +SI:localuser:root`를 자동 실행합니다. 재부팅 후에도 별도 수동 실행은
+필요하지 않습니다. PC 데스크톱에 로그인한 사용자의 터미널에서 실행하세요.
+DISPLAY가 없는 SSH 세션에서는 맨손 + Loop 키보드 연결을 시작할 수 없습니다.
+
+## 상세 자료
+
+- [VR·Loop 구조와 기록 채널](hardware/VR_LOOP.md)
+- [손 드라이버 상세 기록](hardware/HAND_TRACE.md)
+- [HX5 지연 조사와 실패한 우회 실험](hardware/HX5_LATENCY.md)
+- [기존 SG2/backport 안내](docs/LEGACY_MAIN_README.md)
+
+별도 빌드는 원본 Cyclo/underlay를 덮어쓰지 않습니다. 진단용 직접 통신 우회는
+혼합 통신 시험에서 실패하여 기본 실행에서 차단되어 있습니다. 원본 ROS 드라이버의
+손 목표 쓰기를 30Hz로 제한한 별도 빌드를 사용하며 팔 쓰기·피드백 읽기는 유지합니다.

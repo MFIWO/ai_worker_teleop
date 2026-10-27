@@ -31,10 +31,12 @@ def generate_launch_description():
                    name='reference_checker', parameters=[p['config']], output='screen')
     actions = [gate, controller, checker]
     if hands and os.environ.get('AI_WORKER_SH5_INPUT','hands')=='hands':
-        from hardware.sh5_controller_hands import HAND_TOPICS,NATIVE_TOPICS
-        actions.append(Node(package='cyclo_motion_controller_ros_py', executable='retargeting_teleop',
-                            name='retargeting_teleop', output='screen',
-                            remappings=[(HAND_TOPICS[side],NATIVE_TOPICS[side]) for side in HAND_TOPICS]))
+        if os.environ.get('AI_WORKER_SH5_HAND_MODE','1')=='2':
+            actions.append(ExecuteProcess(cmd=[sys.executable, '-m', 'hardware.xr_hand_retarget_node'],
+                                          output='screen'))
+        else:
+            actions.append(ExecuteProcess(cmd=[sys.executable, '-m', 'hardware.cyclo_hand_retarget_node'],
+                                          output='screen'))
     for process in tuple(actions):
         actions.append(RegisterEventHandler(OnProcessExit(target_action=process,
             on_exit=[EmitEvent(event=Shutdown(reason='hardware control component exited'))])))

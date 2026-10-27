@@ -15,6 +15,51 @@ from hardware.session_processes import start,stop,wait
 from hardware.teleop_cli import ipv4,hostname
 
 
+class SessionLog:
+    """Keep shutdown evidence even after an explicit Ctrl+C or broken terminal."""
+    def __init__(self,path):
+        self.file=Path(path).open('a',buffering=1)
+        self.original=(sys.stdout,sys.stderr)
+        self.lock=threading.Lock()
+        owner=self
+        class Stream:
+            def __init__(self,terminal):self.terminal=terminal
+            def __getattr__(self,name):return getattr(self.terminal,name)
+            def write(self,value):
+                with owner.lock:
+                    owner.file.write(value);owner.file.flush()
+                    try:self.terminal.write(value);self.terminal.flush()
+                    except (OSError,ValueError):pass
+                return len(value)
+            def flush(self):
+                with owner.lock:
+                    owner.file.flush()
+                    try:self.terminal.flush()
+                    except (OSError,ValueError):pass
+        sys.stdout,sys.stderr=(Stream(s) for s in self.original)
+
+    def close(self):
+        sys.stdout,sys.stderr=self.original
+        self.file.close()
+
+
+def run_logged(argv, *, timeout=30.):
+    """Capture helper output in the session log, including failed/partial runs."""
+    try:
+        result=subprocess.run(argv,check=True,timeout=timeout,
+                              stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+    except (subprocess.CalledProcessError,subprocess.TimeoutExpired) as error:
+        output=error.stdout or ''
+        if isinstance(output,bytes):output=output.decode(errors='replace')
+        if output:print(output,end='',flush=True)
+        raise
+    if result.stdout:print(result.stdout,end='',flush=True)
+
+
+def release_hands(description):
+    run_logged([sys.executable,'-m','hardware.hand_shutdown','--description',str(description)])
+
+
 def processes():
     result=[]
     for path in Path('/proc').iterdir():
@@ -93,10 +138,10 @@ def main():
     p.add_argument('--loop',choices=('off','vr'),default='off')
     p.add_argument('--input',choices=('hands','controllers'),default='hands')
     p.add_argument('--hand-mode',choices=('1','2'),default='1')
+    p.add_argument('--hand-trace',action='store_true')
     p.add_argument('--loop-no-camera',action='store_true')
     p.add_argument('--host-lease',action='store_true',help=argparse.SUPPRESS)
     args=p.parse_args()
-    if args.hand_mode=='2' and args.input!='controllers':p.error('--hand-mode 2 requires --input controllers')
     os.environ['AI_WORKER_SH5_INPUT']=args.input
     os.environ['AI_WORKER_SH5_HAND_MODE']=args.hand_mode
     lock=open('/tmp/sh5_vr_session.lock','w')
@@ -105,9 +150,17 @@ def main():
     root=Path(__file__).resolve().parents[1]
     for argv in processes():
         if (Path(argv[0]).name in ('vr_controller_node','retargeting_teleop') or
-                'hardware.command_gate' in argv or 'hardware.loop_vr_streamer' in argv):
+                'hardware.command_gate' in argv or 'hardware.loop_vr_streamer' in argv or
+                'hardware.xr_hand_retarget_node' in argv):
             raise SystemExit('Stop the previous VR controller/streamer before starting this session')
     subprocess.run([sys.executable,'-m','hardware.build_sh5_hands','--verify-only'],check=True)
+    if args.hand_trace:
+        subprocess.run([sys.executable,'-m','hardware.build_hand_trace','--verify-only'],check=True)
+    if args.input=='hands' and args.hand_mode=='2':
+        # Resolve the actual hand model and dependencies before any bringup/motion.
+        subprocess.run([sys.executable,'-c',
+            'from hardware.xr_hand_retarget_node import make_retargeters; make_retargeters(); '
+            'print("[XR AI HAND MODE 2] DexPilot dependencies and both HX5 models verified")'],check=True)
     if args.loop=='vr':
         subprocess.run([sys.executable,'-c','import ffw_loop_streamer.loop_streamer_node; import loop_sdk'],check=True)
         if not listening(args.pc_ip,50051):raise SystemExit(f'Open Loop on {args.pc_ip}:50051 first')
@@ -121,10 +174,10 @@ def main():
     reused_follower=None
     follower_candidate=None
     description=logs/'shutdown_robot_description.urdf'
-    def service(name,cmd):
+    def service(name,cmd,*,env=None):
         output=(logs/(name+'.log')).open('w')
         files.append(output)
-        process=start(cmd,output=output)
+        process=start(cmd,env=env,output=output)
         services.append((name,process))
         (logs/(name+'.pid')).write_text(str(process.pid)+'\n')
         print(f'[SERVICE] {name}: PID {process.pid}, log {output.name}',flush=True)
@@ -135,8 +188,9 @@ def main():
     signal.signal(signal.SIGTERM,interrupt)
     signal.signal(signal.SIGHUP,interrupt)
     from hardware.host_lease import watch_host
+    session_log=SessionLog(logs/'exit.log')
     try:
-        watch_host(args.host_lease,logs/'exit.log')
+        watch_host(args.host_lease,logs/'exit.log',redirect_output=False)
         if not listening('127.0.0.1',7447):
             if not args.bringup:raise RuntimeError('Zenoh is absent; use --bringup to start missing services')
             service('zenoh',['ros2','run','rmw_zenoh_cpp','rmw_zenohd'])
@@ -145,8 +199,9 @@ def main():
                 if time.monotonic()>deadline:raise RuntimeError('Zenoh did not open port 7447')
                 time.sleep(.1)
         os.environ['ZENOH_CONFIG_OVERRIDE']='mode="client";connect/endpoints=["tcp/127.0.0.1:7447"]'
-        # Watch PC exit during startup/ready motion as well as normal teleop.
-        children.append(('PC session guard',start([sys.executable,'-m','hardware.hand_shutdown','--guard'])))
+        # PC/VR lifetime is independent of this robot session. The command
+        # gate holds on an expired PC intent lease; keep the follower alive
+        # so a fresh, disarmed PC session can reconnect and explicitly resume.
         follower=any(Path(argv[0]).name=='ros2_control_node' for argv in processes())
         if not follower:
             if not args.bringup:raise RuntimeError('Follower absent; --bringup starts SH5 without native initialization, then raises only the arms over five seconds')
@@ -160,9 +215,25 @@ def main():
             from hardware.hand_shutdown import configuration
             configuration(xml)
             description.write_text(xml)
+            run_logged([sys.executable,'-m','hardware.hand_transport','--description',str(description),
+                        '--report',str(logs/'hand_transport.json')],timeout=15.)
+            if args.hand_trace:
+                from hardware.build_hand_trace import follower_environment
+                follower_env=follower_environment(logs/'driver_trace')
+                print('[HAND TRACE] Timing-only driver selected; capture is OFF until log_hands.sh --driver-trace.',flush=True)
+            else:
+                from hardware.build_hand_write_rate import follower_environment
+                follower_env=follower_environment()
+            print('[HAND WRITE] Existing follower driver: HX5 motor packets 30 Hz; '
+                  'arm writes/read loop unchanged. No extra hand relay.',flush=True)
             follower_started=True
-            service('follower',['ros2','launch','ffw_bringup','ffw_sh5_follower_ai.launch.py','init_position:=false'])
+            service('follower',['ros2','launch','ffw_bringup','ffw_sh5_follower_ai.launch.py','init_position:=false'],env=follower_env)
         else:
+            if args.hand_trace:
+                from hardware.build_hand_trace import verify_running_follower
+            else:
+                from hardware.build_hand_write_rate import verify_running_follower
+            verify_running_follower()
             follower_candidate=find_follower_launch()
             if follower_candidate is None:
                 raise RuntimeError('Existing follower has no unique SH5 launch parent; stop it and restart this command with --bringup so exit can release finger torque')
@@ -195,7 +266,8 @@ def main():
                   '--robot-ip',args.robot_ip]
             if args.loop_no_camera:loop.append('--no-camera')
             children.append(('VR Loop',start(loop)))
-        print('[SESSION] Closing either terminal stops motion; after 3s, stop SH5 follower and verify finger torque OFF. '
+        print('[SESSION] PC/VR exit holds motion and keeps this robot session/follower running. '
+              'Closing this robot terminal stops SH5 follower after 3s and verifies finger torque OFF. '
               f'Service logs: {logs}',flush=True)
         wait([item for item in children if item[0]!='head JPEG loader'],services)
     except KeyboardInterrupt:pass
@@ -227,7 +299,7 @@ def main():
         release_error=None
         if (follower_started or reused_follower) and description.exists():
             try:
-                subprocess.run([sys.executable,'-m','hardware.hand_shutdown','--description',str(description)],check=True,timeout=30.)
+                release_hands(description)
             except Exception as error:
                 release_error=error
                 print(f'[HAND TORQUE OFF FAILED] Physical release NOT verified: {error}',file=sys.stderr,flush=True)
@@ -240,6 +312,7 @@ def main():
             except Exception as error:print(f'[STOP ERROR] {name}: {error}',file=sys.stderr,flush=True)
         for file in files:file.close()
         lock.close()
+        session_log.close()
         if release_error:raise RuntimeError('Finger torque release incomplete; inspect session exit log') from release_error
 
 

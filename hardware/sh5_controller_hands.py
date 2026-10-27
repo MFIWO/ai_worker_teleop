@@ -69,6 +69,10 @@ def targets(poses,controls):
 
 
 class SH5HandOutput:
+    @property
+    def direct_output(self):
+        return self.mode=='hands' or self.hand_mode==2
+
     def __init__(self,node,limits,mode):
         if mode not in ('hands','controllers'):raise ValueError('unsupported SH5 input mode')
         from trajectory_msgs.msg import JointTrajectory
@@ -90,9 +94,13 @@ class SH5HandOutput:
         self.controls = None
         self.rx = -math.inf
         self.previous = {}
-        self.filtered = {}
         self.active = False
         self.last_output = 0.
+        node.get_logger().info('[SH5 HAND OUTPUT] '+(
+            'Optical input callbacks only; no hand output timer or interpolation. Global HOLD/fault remains.'
+            if self.mode=='hands' else
+            'Direct position relay; no added smoothing, slew or hand-age gate. Global HOLD/fault remains.'
+            if self.direct_output else 'Mode 1: original hand velocity limits and input watchdog.'))
 
     def receive(self,payload,now):
         self.controls = None if payload is None else control_values(payload)
@@ -116,6 +124,10 @@ class SH5HandOutput:
                                      f'limits=[{lower:.9g}, {upper:.9g}], solver margin={NATIVE_SOLVER_MARGIN:.9g} rad')
             values = {n:min(self.limits[n]['upper'],max(self.limits[n]['lower'],v)) for n,v in values.items()}
             self.native[side] = (values,time.monotonic())
+            # Relay each native result on arrival, independently per side.
+            # No resampling, smoothing, slew limit or hand-specific age gate.
+            if self.active and self.node.intent_enabled and self.node.fault is None:
+                self.publish(values)
         except ValueError as error:
             self.native.pop(side,None)
             if self.node.intent_enabled:self.node.latch(str(error))
@@ -125,6 +137,11 @@ class SH5HandOutput:
             writers = self.node.get_publishers_info_by_topic(topic)
             if len(writers) != 1 or writers[0].node_name != self.node.get_name():
                 raise ValueError('controller hand output requires one gate writer; stop native/other hand retargeters')
+        if self.mode=='hands' and self.hand_mode==2:
+            for topic in NATIVE_TOPICS.values():
+                writers = self.node.get_publishers_info_by_topic(topic)
+                if len(writers)!=1 or writers[0].node_name!='xr_ai_hand_retargeter':
+                    raise ValueError(f'{topic}: require one xr_ai_hand_retargeter writer')
 
     def publish(self,values):
         from trajectory_msgs.msg import JointTrajectory,JointTrajectoryPoint
@@ -138,8 +155,12 @@ class SH5HandOutput:
             self.publish(measured)
         self.active = False
         self.previous.clear()
-        self.filtered.clear()
         self.preparing.clear()
+
+    def update_authority(self,measured,now,allowed):
+        """Optical hand lifecycle only; enabling never replays a saved goal."""
+        if allowed:self.active=True
+        else:self.hold(measured,now-self.node.measured_rx <= .5)
 
     def prepare_targets(self,desired,measured,now):
         for side,item in self.controls.items():
@@ -170,8 +191,9 @@ class SH5HandOutput:
 
     def tick(self,measured,now,allowed):
         from hardware.aux_controls import slew_aux
-        ready = (self.controls is not None and now-self.rx<=.3) if self.mode=='controllers' else (
-            len(self.native)==2 and all(now-stamp<=.3 for _,stamp in self.native.values()))
+        if self.mode=='hands':
+            raise ValueError('optical hand targets must be forwarded on input, never on timer ticks')
+        ready = self.controls is not None and (self.direct_output or now-self.rx<=.3)
         if not allowed or not ready:
             self.hold(measured,now-self.node.measured_rx <= .5)
             return
@@ -181,14 +203,8 @@ class SH5HandOutput:
             raise ValueError('controller hands require all 40 fresh measured finger joints')
         if self.mode=='controllers' and self.hand_mode==2:
             desired=self.prepare_targets(desired,measured,now)
-            # Smooth controller sampling and preparation transitions without
-            # bypassing physical velocity limits or stale-input HOLD below.
-            dt=min(max(now-self.last_output if self.active else .01,.001),.05)
-            alpha=-math.expm1(-dt/.06)
-            desired={n:self.filtered.get(n,measured[n])+alpha*(v-self.filtered.get(n,measured[n]))
-                     for n,v in desired.items()}
-            self.filtered=dict(desired)
-        output = slew_aux(desired,self.previous,measured,self.limits,
-                          now-self.last_output if self.active else .01)
+        output = (desired if self.direct_output else
+                  slew_aux(desired,self.previous,measured,self.limits,
+                           now-self.last_output if self.active else .01))
         self.publish(output)
         self.previous,self.last_output,self.active = output,now,True

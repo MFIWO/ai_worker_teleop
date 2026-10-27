@@ -1,5 +1,27 @@
 # SH5 VR teleoperation and continuous Loop recording
 
+Optical hand selection: `--input hands --hand-mode 1` uses the installed Cyclo original
+retargeter, including its native solver and output filter (default). `--input hands --hand-mode 2` uses the HX5 DexPilot
+implementation from `xr_ai_teleop`, including its 25-point mapping, scale 1.6,
+and alpha 1.0. Select the same mode in both PC and robot commands. The arm
+input, mapping and controller are unchanged. Controller input retains its
+existing mode 1/2 meanings.
+
+Mode 2 sends fresh HAND_MOVE samples independently of BODY events, runs the
+latest samples at up to 50 Hz on the robot, and sends private hand targets
+through the existing gate. HOLD/fault stops forwarding; enabling never replays
+cached hand goals. The original retargeter is not launched in this mode.
+Run `hardware/install_pc.sh` and `hardware/install_robot.sh` on their respective
+hosts after updating the checkout. The robot installer includes pinned pure
+Python DexPilot dependencies without replacing the installed numerical stack.
+Models/dependencies are checked before robot bringup. This selects a hand
+mapping; it does not change HX5 firmware, motor profiles or packet cadence.
+
+The PC host launcher automatically authorizes local container root with
+`xhost +SI:localuser:root` in the current desktop session. Run it from the
+logged-in desktop user's terminal; optical hands with Loop require DISPLAY.
+No manual xhost command is needed after reboot.
+
 The two commands below run in separate PC terminals. The PC address must match
 the Vuer certificate. Open the installed Loop application first for `--loop vr`.
 The PC command waits up to 120 seconds for the robot's Zenoh port 7447 before
@@ -9,12 +31,12 @@ means the robot session/router still needs attention. Ctrl+C cancels the wait.
 
 ```bash
 cd ~/Downloads/external_repos/ai_worker_teleop_deploy
-bash teleop.sh pc --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop vr --input controllers
+bash teleop.sh pc --pc-ip 192.0.2.10 --robot-ip 192.0.2.20 --loop vr --input hands --hand-mode 1
 ```
 
 ```bash
 cd ~/Downloads/external_repos/ai_worker_teleop_deploy
-bash teleop.sh robot --pc-ip 192.168.6.2 --robot-ip 192.168.6.50 --loop vr --input controllers --bringup
+bash teleop.sh robot --pc-ip 192.0.2.10 --robot-ip 192.0.2.20 --loop vr --input hands --hand-mode 1 --bringup
 ```
 
 `--bringup` starts a missing Zenoh router and SH5 follower with
@@ -30,13 +52,20 @@ the same arms-only move explicitly. Stop old initialization executors and VR
 controllers first. Motion failure prevents the VR controller from starting.
 Without `--bringup`, router and follower must already run.
 
-The foreground session owns the VR controller and optional Loop streamer. On
-Ctrl+C or terminal closure first stops command production. After a minimum
+The robot foreground session owns the controller and optional Loop streamer.
+Closing the PC/VR session stops only Vuer and its keyboard operator. The command
+gate holds after 1.5s without a PC intent lease; the robot session, follower, and Loop
+streamer remain running. Reconnect with the same PC command, reload Quest, and
+explicitly start/resume after fresh tracking and feedback are ready. The
+reconnection must first send a disarmed intent; delayed enabled packets cannot
+auto-resume motion. An existing unrelated fault still needs the normal reset.
+
+Closing the **robot** terminal first stops command production. After a minimum
 three-second exit grace, the SH5 follower stops and a dedicated helper disables
 TableSync and sends Torque Enable(64)=0 to each of the 40 finger motors using
 direct motor access. It reads back each torque register; only 40 verified zeros
 produce `[HAND TORQUE OFF] Verified 40/40 finger motors`. The delay starts on
-robot-session exit detection; network/PC-heartbeat detection, launch cleanup
+robot-session exit detection; robot host-lease detection, launch cleanup
 and register checks add time. No position/open-hand trajectory is sent.
 
 Tagged launch children are cleaned up even if the launch parent has already
@@ -50,15 +79,21 @@ leader. `--loop off` is the default and disables recording integration. Input mo
 `--dry-run` prints the host command without SSH, ROS, or hardware startup.
 The normal host wrapper sends a stdin lease through non-TTY SSH/docker exec.
 Ctrl+C closes the lease; closing/killing the host terminal or a lost connection
-also ends/expires it on the container side. The robot additionally detects a
-previously connected PC Vuer heartbeat disappearing (1.5s). B+Y/V HOLD and Quest
-tracking loss retain intent heartbeats and do **not** trigger torque OFF.
+also ends/expires that terminal's session on the container side. A PC host-lease
+expiry ends only the PC session; it does not close the robot session. PC intent
+timeouts, B+Y/V HOLD, and Quest tracking loss do **not** trigger torque OFF.
 Terminal disconnect logs are saved to the session's `exit.log` (PC side:
 `/tmp/sh5_pc_session_exit.log`). Allow cleanup to finish before restarting.
 
 The helper verifies that no other process owns the serial device. It refuses
-a second bus connection, unknown SH5 motor mappings and non-Direct-Control hand
-mode. It never clears errors, enables torque or changes operating mode. Failure
+a second bus connection and unknown SH5 motor mappings. It verifies TableSync
+OFF before direct motor access and reads back all 40 Torque Enable registers.
+Torque OFF is permitted in both board Operating Modes. Before starting a new
+follower, `hand_transport` verifies all 40 torques and TableSync are OFF, sets
+HX5 Operating Mode(33) from Preset(1) to Direct Control(0) only when needed,
+and reads it back. The old values and verification results are saved in the
+session's `hand_transport.json`. It does not change profiles or send goals.
+It never clears errors, enables torque or changes operating mode. Failure
 is explicitly logged as `[HAND TORQUE OFF FAILED]`; absence of a success log
 is not proof of release. Container/power loss or killing the cleanup process
 itself cannot execute software cleanup. Restart the complete robot command to
@@ -134,13 +169,38 @@ according to trigger depth. Its closed target uses the original pinch for
 thumb/index/middle; ring/little copy the middle finger's flexion angles while
 retaining their C-rest roll, so they do not turn toward the thumb.
 There is no arrival wait or preparation timeout
-for Y. Mode 2 target changes use a 60ms exponential filter before the existing
-velocity cap; stale inputs and HOLD still stop output through the gate.
+for Y. Mode 2 sends computed positions at the gate rate without an extra
+output filter or velocity slew limit. Mode 1 keeps its previous slew and age checks.
+
+Optical `--input hands --hand-mode 1` delegates landmark-to-joint processing to
+Cyclo's installed `scripts.teleop_retargeting` without thumb overrides, filter
+changes or solver-budget changes. This is the Cyclo original comparison path.
+The existing PC input adapter still publishes each HAND_MOVE immediately with
+wrist-local coordinates; BODY_MOVE does not replay hand samples.
+Mode 2 fixes the two thumb bends inside the DexPilot kinematic solve while
+optimizing the remaining 18 joints, preserving root opposition/pinch solving,
+with 14 evaluations / 6ms NLopt budgets (not a hard runtime guarantee).
+The robot-side gate/arm and controller-input paths otherwise remain unchanged.
+See HX5_LATENCY.md for measured limits and the rejected bypass experiment.
+
+The PC's 30 Hz goal rate does not set the motor bus write rate: the follower
+previously resent every hand goal on its 100 Hz hardware write loop. The
+`build_hand_write_rate` overlay keeps the same driver and serial ownership,
+but sends HX5 model 260/261 goal packets at 30 Hz using the latest command
+buffers. Arm writes and all reads retain their existing loop. There is no
+additional relay, interpolation, FIFO or motor profile/torque change.
+Only the robot session's follower child selects this verified driver build.
+`[HX5 WRITE]` reports each board's successful packet rate every five seconds.
+Restart an existing follower to select it. This change requires a physical
+before/after check; it is not evidence that the remaining board-side plateau
+has been resolved. The local `xr_tele` RH5DG2 reference uses a separate hand
+command thread and state-receive thread, normally at a 20 Hz command rate;
+its input/optimizer code is not substituted for the stock SH5 retargeter.
 A first positions/extends the thumb outside while holding the other fingers.
 For A the gate waits for measured preparation
 (within 0.1rad, minimum 0.12s) before closure. Failure to reach it within 3s
 raises a gate fault and holds. For A the thumb stays outside while trigger
-scales the other four fingers. The existing velocity cap is applied throughout.
+scales the other four fingers. This preparation sequence remains in mode 2.
 
 SH5 right-stick functions are exclusive: HEAD mode controls lift with vertical
 stick travel; MOBILE mode controls base yaw with horizontal travel and ignores
@@ -155,24 +215,31 @@ checkout's Pico streamer uses trigger/grip for its hand gestures. HX5 angles
 are model-based candidates and have not been physically calibrated for contact
 or force. No tactile force regulation is added.
 
-The final 40 finger targets pass through the robot gate at 100Hz, capped at
-85% of each physical URDF velocity limit. Mode 1 and optical hand input retain
-the same cap. This reduces speed modestly; it does not reduce holding torque
-or prove thermal protection. HOLD retains measured positions rather than
-disabling torque. Stale controller input stops updates.
+Mode 1 retains the 85% physical URDF velocity cap. Mode 2 uses direct position
+forwarding; optical hands use the original ROBOTIS hand pipeline directly.
+No follower/motor profile, current, or torque settings are changed by that routing.
+HOLD retains measured positions rather than disabling torque. Whole-session
+tracking, lease, fault, and shutdown handling remain active. Removing the
+hand-only age check does not disable these session checks.
 
 For the prior optical hand/Loop keyboard workflow, use `--input hands` on both
 commands. That mode retains V start/HOLD/resume and the C review-key mapping.
 
 ## Recording behavior
 
-In Loop Preview, select **AI Worker VR / HX5-D20** (stable source key
-**robotis-vr-sh5**), robot type **ffw_sh5_vr**, action space **joint_position**,
-and finger type **HX5-D20**. This one robot source carries the arm/hand angles,
-hand commands, raw fingertip pressures and teleop metadata together. The
-finger-type selector is advertised through the same SDK `finger_type` axis
-used by xr_tele for RH5DG2. Reopen/reselect a saved Preview configuration after
-updating to pick up the new option and channels. Select the
+In Loop Preview, select the separate Robot State sources **aiworker**
+(source key **robotis-vr-sh5**) and **HX5-D20**
+(source key **robotis-vr-sh5-hand**). These are the two Robot State sources;
+no separate Tactile source is registered. Robot State uses robot type
+**ffw_sh5_vr**, action space **joint_position**, and finger type **HX5-D20**.
+The robot source carries arm/body data; the hand source carries hand joint
+observations, commands, raw tactile pressure, and controller metadata.
+Remove or Ignore the old combined **AI Worker VR / HX5-D20** and separate
+**robotis-vr-sh5-tactile**
+entry in saved Preview settings, then save the separate source selections.
+Updating code does not migrate saved Loop settings. If the old source is
+still live, check for an older streamer process before removing its entry.
+Select the
 camera sources exposed by the existing robot camera implementation. Start,
 finish, save and discard the episode in Loop as usual. The wrapper never
 invokes Loop's recording start/stop/save/delete API.
@@ -225,7 +292,7 @@ Status/timing continue even when pressure is missing; `valid_message` describes
 the last message, while `fresh` additionally checks receipt age. Receipt Hz
 measures callback arrival, not the hardware sampling clock or sensor health.
 
-The combined source sends the latest raw readings on its existing 30 Hz
+The HX5-D20 hand source sends the latest raw readings on its existing 30 Hz
 recording clock, alongside joint values, including during V/HOLD. It does not
 preserve every upstream frame if the pressure publisher runs faster; header
 stamps, receipt sequence and arrival rate make reuse/downsampling visible.
@@ -403,49 +470,3 @@ The reference `external_repos/loop` predates the on-robot stereo head JPEG and
 driver-side wrist rotation changes. Its whole package must not replace the
 installed robot package. Loop application binaries and its recording engine
 are not patched; this is an additive source and input bridge.
-
-## Read-only hardware finding (2026-10-23)
-
-With the follower stopped and no owner of `/dev/follower`, board-only READs
-returned Hardware Error Status(71)=64 (0x40) and Bus Watchdog(8)=255
-(signed -1) on right ID110 and left ID140. Input voltages were 28.62V and
-28.48V. The [official hand control table](https://ai.robotis.com/hands/control_table_hands.html)
-identifies these as Bus Watchdog errors after an interruption of TableSync
-communication. They may have occurred when the follower stopped; this reading
-does not establish the cause of earlier in-motion flashing or finger heating.
-That diagnostic used READs only; no error clear, torque change or physical
-motion was performed during the diagnostic. The subsequent exit helper is
-explicitly designed to WRITE only TableSync OFF and finger Torque OFF.
-Individual finger motor temperatures and overload flags were not obtained.
-
-## Robot eth0 boot conflict
-
-On 2026-10-23, this robot's `/etc/netplan/interfaces.yaml` used `networkd`
-and assigned eth0 `192.168.6.2/24`, while its saved NetworkManager profile
-assigned `192.168.6.50/24`. Udev reported `NM_UNMANAGED=1`; the boot log
-left eth0 unmanaged until manual activation. The PC log also recorded a
-conflict for its `.2` address from the robot's MAC. PC USB Ethernet already
-had autoconnect enabled.
-
-The robot HOST helper is deliberately separate from motor/source installation:
-
-```bash
-ssh -t robotis@192.168.6.50 \
-  'sudo python3 ~/ai_worker_teleop_sh5/hardware/fix_robot_ethernet.py'
-```
-
-It checks the narrow known Netplan layout and active static-IP NM profile,
-backs up the configuration, replaces the obsolete networkd definition with
-[Netplan's NetworkManager renderer](https://netplan.readthedocs.io/en/stable/nm-all/),
-and preserves the existing `.50` connection. Autoconnect stays enabled with
-[unlimited retries](https://www.networkmanager.dev/docs/api/latest/settings-connection.html).
-It runs `netplan generate` for the next boot and does not restart networking,
-apply a live address change, reboot, or start any robot controller. A backup
-and restore script path are printed; errors restore the previous settings.
-The final root application requires the robot's sudo authentication. Boot-time
-reconnection still needs confirmation after an operator-controlled reboot.
-
-Applied to `ffw-SNPR48A1114` on 2026-10-23. The retained eth0 profile reads
-`192.168.6.50/24`, autoconnect=yes, retries=0. Backup:
-`/var/backups/ai-worker-ethernet/1777511249356407928`. SSH remained connected;
-a real reboot/boot-time reconnection has not been exercised.

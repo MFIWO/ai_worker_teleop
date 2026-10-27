@@ -37,6 +37,7 @@ from hardware.torque_evidence import TorqueEvidence
 
 FEEDBACK_FRESH_SECONDS = 5.0
 FEEDBACK_WAIT_SECONDS = 50.0
+PC_SESSION_TIMEOUT_SECONDS = 1.5
 
 def deployment_domain():
     mode = os.environ.get('AI_WORKER_XR_EXECUTION', '')
@@ -54,18 +55,25 @@ class HardwareCommandGate(Node):
         super().__init__(GATE_NAME)
         self.profile['hand_input'] = os.environ.get('AI_WORKER_SH5_INPUT','hands')
         self.profile['hand_mode'] = int(os.environ.get('AI_WORKER_SH5_HAND_MODE','1'))
-        if self.profile['hand_mode'] not in (1,2) or (self.profile['hand_mode']==2 and self.profile['hand_input']!='controllers'):
-            raise ValueError('hand mode 2 requires controller input')
+        if self.profile['hand_mode'] not in (1,2):
+            raise ValueError('hand mode must be 1 or 2')
         if self.profile['model']=='sh5' and self.profile.get('finger_limits'):
             from hardware.sh5_controller_hands import HAND_SPEED_SCALE
-            self.profile['hand_speed_scale'] = HAND_SPEED_SCALE
+            direct = self.profile['hand_input']=='hands' or self.profile['hand_mode']==2
+            self.profile['hand_speed_scale'] = None if direct else HAND_SPEED_SCALE
+            self.profile['hand_output_policy'] = ('xr_ai_dexpilot' if self.profile['hand_input']=='hands' and self.profile['hand_mode']==2 else
+                                                   'stock_robotis' if self.profile['hand_input']=='hands' else
+                                                   'direct_position' if direct else 'velocity_limited')
+            self.profile['hand_input_timeout_s'] = None if direct else .3
+            self.profile['hand_output_cadence'] = ('latest_xr_samples' if self.profile['hand_input']=='hands' and self.profile['hand_mode']==2 else
+                                                  'native_retargeter' if self.profile['hand_input']=='hands' else 'gate_timer')
         public_profile = {k: v for k, v in self.profile.items()
                           if k not in ('model_report', 'initial_collision_report')}
         self.declare_parameter('profile_json', json.dumps(public_profile),
                                ParameterDescriptor(read_only=True))
         self.model = self.profile['model']
         self.controller_hands = None
-        if self.model=='sh5' and self.profile.get('finger_limits'):
+        if self.model=='sh5' and self.profile.get('finger_limits') and (self.profile['hand_input']=='controllers' or self.profile['hand_mode']==2):
             from hardware.sh5_controller_hands import SH5HandOutput
             self.controller_hands = SH5HandOutput(self,self.profile['finger_limits'],self.profile['hand_input'])
         self.aux_collision = None
@@ -89,6 +97,7 @@ class HardwareCommandGate(Node):
         self.intent_rx = -math.inf
         self.intent_enabled = False
         self.pc_intent_enabled = False
+        self.pc_reconnect_disarm_required = False
         self.enabled_since = None
         self.commands = {}
         self.previous = {}
@@ -196,7 +205,7 @@ class HardwareCommandGate(Node):
         # uses the existing driver's torque management, not a broken extra proof.
         bus_ok = motor_read_health(
             msg.id, msg.dxl_hw_state, msg.comm_state, self.profile['arm_dxl_ids'])
-        if self.controller_hands:
+        if self.profile.get('finger_limits'):
             # Also reject errors on any reported hand/robot device. This does
             # not claim missing temperature/board registers were measured.
             bus_ok = bus_ok and motor_read_health(msg.id,msg.dxl_hw_state,msg.comm_state,{'reported':list(msg.id)})
@@ -243,6 +252,10 @@ class HardwareCommandGate(Node):
             elif data.get('controller_hands') is not None:
                 raise ValueError('PC controller input does not match robot hand mode')
             enabled = data['enabled']
+            if not enabled:
+                self.pc_reconnect_disarm_required = False
+            elif self.pc_reconnect_disarm_required:
+                enabled = manual = False
             self.pc_intent_enabled = enabled
             if enabled and not self.intent_enabled:
                 self.enabled_since = time.monotonic()
@@ -284,6 +297,12 @@ class HardwareCommandGate(Node):
 
     def graph(self):
         if self.controller_hands:self.controller_hands.graph()
+        elif self.model=='sh5' and self.profile.get('finger_limits'):
+            from hardware.sh5_controller_hands import HAND_TOPICS
+            for topic in HAND_TOPICS.values():
+                writers=self.get_publishers_info_by_topic(topic)
+                if len(writers)!=1 or writers[0].node_name!='retargeting_teleop':
+                    raise ValueError(f'{topic}: require original ROBOTIS retargeting_teleop writer')
         if any(name == 'arm_retargeting_teleop' for name, _ in self.get_node_names_and_namespaces()):
             raise ValueError('legacy arm retargeter must be stopped')
         if self.aux_pub:
@@ -421,6 +440,13 @@ class HardwareCommandGate(Node):
         now = time.monotonic()
         if self.readiness_policy == 'strict_torque' and not self.motor_topic_ok:
             self.motor_ok = False
+        if (self.model=='sh5' and self.intent_enabled
+                and now-self.intent_rx>PC_SESSION_TIMEOUT_SECONDS):
+            # Vuer may be restarted independently. Disarm without killing the
+            # follower or latching a fault; reconnection must explicitly enable.
+            self.hold('PC/Vuer disconnected; robot session retained, waiting for manual resume')
+            self.intent_enabled = self.pc_intent_enabled = False
+            self.pc_reconnect_disarm_required = True
         try:
             # Manual keyboard motion can continue while arms are explicitly held.
             # It uses the same unique follower writer, physical limits and motor
@@ -515,12 +541,20 @@ class HardwareCommandGate(Node):
             self.latch(str(error))
         if self.controller_hands:
             try:
-                self.controller_hands.tick(self.measured,now,
-                    self.intent_enabled and self.fault is None and self.output_active and not self.feedback_waiting
-                    and now-self.intent_rx <= .3 and now-self.measured_rx <= .5
-                    and self.motor_ok and now-self.motor_rx <= .5)
+                self.update_hand_output(now)
             except (ValueError,KeyError) as error:self.latch('controller hands: '+str(error))
         self.publish_status(now)
+
+    def update_hand_output(self,now):
+        hand=self.controller_hands
+        allowed=(self.intent_enabled and self.fault is None and self.output_active
+                 and not self.feedback_waiting and self.motor_ok and (hand.direct_output or (
+                     now-self.intent_rx <= .3 and now-self.measured_rx <= .5 and now-self.motor_rx <= .5)))
+        if hand.mode=='hands':
+            # Optical targets belong solely to native input callbacks. The
+            # arm/watchdog timer only changes hand authority on transitions.
+            if hand.active!=allowed:hand.update_authority(self.measured,now,allowed)
+        else:hand.tick(self.measured,now,allowed)
 
     def publish_status(self, now):
         if now-self.last_status >= .1:

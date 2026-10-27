@@ -13,13 +13,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Point32
-from robotis_interfaces.msg import HandJoints
 from std_srvs.srv import SetBool
 from std_msgs.msg import String
 from vuer.schemas import Body, Hands, Scene, MotionControllers
 
-from robotis_vuer.sh5_optical_hand import parse_hand_poses, retarget_sh5_hand
+from robotis_vuer.stock_sh5_hand import StockSH5HandInput
 from robotis_vuer.vr_publisher_ai_worker_hardware import HardwareXRPublisher
 from robotis_vuer.vr_publisher_sg2 import VRTrajectoryPublisher
 from rclpy.signals import SignalHandlerOptions
@@ -42,8 +40,8 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self._fast_resume_at = None
         self._controller_mode = os.environ.get('AI_WORKER_SH5_INPUT','hands') == 'controllers'
         self._hand_mode = int(os.environ.get('AI_WORKER_SH5_HAND_MODE','1'))
-        if self._hand_mode not in (1,2) or (self._hand_mode==2 and not self._controller_mode):
-            raise ValueError('hand mode 2 requires SH5 controller input')
+        if self._hand_mode not in (1,2):
+            raise ValueError('hand mode must be 1 or 2')
         self._hand_modes = ControllerHandModes()
         self._controller_event_rx = -1e9
         self._stick_log_at = -1e9
@@ -74,9 +72,11 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 self.create_subscription(String, '/xr_hardware/operator_keys', self._operator_input, 10)
         if self.hardware_model != "sh5":
             raise ValueError("Optical SH5 hands require --model sh5")
-        self._hand_publishers = {} if self._controller_mode else {side: self.create_publisher(
-            HandJoints, f'/{side}_hand/hand_joint_pos', self.vr_stream_qos)
-            for side in SIDES}
+        self._stock_hands=StockSH5HandInput(self) if not self._controller_mode and self._hand_mode==1 else None
+        self._xr_hands=None
+        if not self._controller_mode and self._hand_mode==2:
+            from hardware.xr_hand_input import XRHandInput
+            self._xr_hands=XRHandInput(self)
         if not self._controller_mode:self.vuer.add_handler('HAND_MOVE')(self.on_hand_move)
         self.create_service(SetBool, '/sh5_teleop/enable', self._enable_service)
         if self._controller_mode:
@@ -85,10 +85,12 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             self.get_logger().info(f'[HAND MODE {self._hand_mode}] '+(
                 'Original proportional trigger grasp; grip=thumb/index/middle pinch.' if self._hand_mode==1 else
                 'Tap X=full grip, Y=angled grip, B=point, A=thumb-out grip. Each trigger captures its own pose until released; grip pinch overrides. AX/BY reserved.'))
+        elif self._hand_mode==2:
+            self.get_logger().info('[SH5 HANDS MODE 2] Fingers use xr_ai_teleop HX5 DexPilot; 25-point HAND_MOVE input, no BODY resampling. Existing arm path retained.')
         else:
             self.get_logger().info(
                 '[SH5 HANDS] Optical wrists -> existing HardwareXRPublisher; '
-                'fingers -> original ROBOTIS retargeting_teleop through the hand gate. '
+                'fingers -> HAND_MOVE + Cyclo original retargeter. '
                 'Release gestures, then pinch + opposite squeeze for 3s to start/stop.')
         if start_server:
             self.start_vuer_server()
@@ -242,7 +244,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         expected = 'controllers' if self._controller_mode else 'hands'
         if (self._hardware_manifest or {}).get('hand_input','hands') != expected:
             raise ValueError('PC/robot --input must match: '+expected)
-        if self._controller_mode and (self._hardware_manifest or {}).get('hand_mode',1)!=self._hand_mode:
+        if (self._hardware_manifest or {}).get('hand_mode',1)!=self._hand_mode:
             raise ValueError('PC/robot --hand-mode must match')
 
     async def on_controller_move(self, event, session):
@@ -294,13 +296,26 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         return False, False
 
     async def on_hand_move(self, event, session):
+        if self._controller_mode:return
         with self._xr_lock:
-            # Partial optical frames must not become commands or refresh liveness.
+            # Original caching is independent per hand. Arm input validation
+            # below does not reset or discard the original finger filter state.
+            if self._stock_hands is not None:
+                await self._stock_hands.on_hand_move(event,session)
+                self._stock_hands.publish_event(event, self.arm_control_enabled and self._phase=='ACTIVE')
+            # Only wrist transforms belong to the arm adapter. Finger-frame
+            # validation must not alter the stock hand cache or filter.
             try:
                 value = getattr(event, 'value', None)
                 if not isinstance(value, dict):
                     raise ValueError('expected both optical hands')
-                parsed = {side: parse_hand_poses(value[side]) for side in SIDES}
+                wrists={}
+                for side in SIDES:
+                    raw=np.asarray(value[side],dtype=np.float64)
+                    if raw.size!=400:raise ValueError('expected 25 optical poses for arm wrist input')
+                    wrist=raw.reshape(-1)[:16].reshape(4,4,order='F')
+                    if not np.isfinite(wrist).all():raise ValueError('nonfinite optical wrist')
+                    wrists[side]=wrist
             except (KeyError, TypeError, ValueError, OverflowError) as error:
                 self._gesture_since = None
                 self._gesture_ready = False
@@ -309,7 +324,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 now = time.monotonic()
                 if now - getattr(self, '_invalid_hand_log_at', -1e9) >= 2.:
                     self.get_logger().warning(
-                        '[SH5 INPUT DROP] Ignoring incomplete/invalid hand frame; '
+                        '[SH5 ARM INPUT DROP] Ignoring incomplete/invalid wrist frame for arm input; '
                         'last valid targets retained, input timeout unchanged: ' + str(error))
                     self._invalid_hand_log_at = now
                 # Preserve last successful receipts. Existing hardware hold/grace
@@ -331,36 +346,26 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 if not fresh_body:
                     self._reset_hand_input()
                 adapted = {}
-                for side, (positions, rotation) in parsed.items():
-                    wrist = np.eye(4)
-                    wrist[:3, :3], wrist[:3, 3] = rotation, positions[0]
+                for side,wrist in wrists.items():
                     adapted[side] = wrist.flatten(order='F').tolist()
                     # No trigger/stick values: never generate SG2 gripper,
                     # lift, head or base commands from a hand gesture.
                     adapted[side + 'State'] = {'aButton': start, 'bButton': stop}
                 await HardwareXRPublisher.on_controller_move(
                     self, SimpleNamespace(value=adapted), session)
-                if (not self.arm_control_enabled or self._phase != "ACTIVE" or
-                        self._tracking_input_state() != "fresh" or
-                        self._feedback_input_state(time.monotonic()) != "fresh"):
-                    self._hand_previous = dict.fromkeys(SIDES)
-                    return
-                processed = {side: retarget_sh5_hand(
-                    value[side], self.head_transform_matrix, self._hand_previous[side])
-                    for side in SIDES}
-                stamp = self.get_clock().now().to_msg()
-                for side, (points, previous) in processed.items():
-                    msg = HandJoints()
-                    msg.header.stamp = stamp
-                    msg.joints = [Point32(x=float(p[0]), y=float(p[1]), z=float(p[2]))
-                                  for p in points]
-                    self._hand_publishers[side].publish(msg)
-                    self._hand_previous[side] = previous
+                if self._xr_hands is not None:
+                    self._xr_hands.publish_event(event, self.arm_control_enabled and self._phase=='ACTIVE')
             except (KeyError, TypeError, ValueError, OverflowError, AttributeError) as error:
                 self.last_controller_pose_sec = dict.fromkeys(SIDES)
                 self._reset_hand_input()
                 if self.arm_control_enabled:
                     self._set_arm_control_enabled(False, 'invalid optical hands: ' + str(error))
+
+    async def on_body_tracking_move(self,event,session):
+        if self._stock_hands is not None:
+            with self._xr_lock:
+                self._stock_hands.process_body(event,self.arm_control_enabled)
+        await super().on_body_tracking_move(event,session)
 
     def _enable_service(self, request, response):
         with self._xr_lock:
