@@ -10,6 +10,10 @@ HAND_TOPICS = {side: f'/leader/joint_trajectory_command_broadcaster_{side}_hand/
                for side in FINGER_NAMES}
 NATIVE_TOPICS = {side:f'/xr_hardware/sh5/native_{side}_hand' for side in FINGER_NAMES}
 HAND_SPEED_SCALE = .85
+# ROBOTIS DexPilotOptimizer.set_joint_limit expands bounds by 1e-3 rad.
+# Accept that solver margin at input, then clamp to the physical URDF bounds.
+# This never expands the limits of a command sent to the hand.
+NATIVE_SOLVER_MARGIN = 1e-3 + 1e-6
 
 
 def control_values(payload):
@@ -105,8 +109,11 @@ class SH5HandOutput:
                     or set(msg.joint_names)!=set(FINGER_NAMES[side]) or len(msg.points[0].positions)!=20):
                 raise ValueError('expected complete named 20-joint native hand trajectory')
             values = dict(zip(msg.joint_names,msg.points[0].positions))
-            if any(not math.isfinite(v) or not self.limits[n]['lower']-1e-4<=v<=self.limits[n]['upper']+1e-4 for n,v in values.items()):
-                raise ValueError('native hand target outside physical bounds')
+            for n,v in values.items():
+                lower,upper=self.limits[n]['lower'],self.limits[n]['upper']
+                if not math.isfinite(v) or not lower-NATIVE_SOLVER_MARGIN<=v<=upper+NATIVE_SOLVER_MARGIN:
+                    raise ValueError(f'native hand target outside physical bounds: {n}={v:.9g}, '
+                                     f'limits=[{lower:.9g}, {upper:.9g}], solver margin={NATIVE_SOLVER_MARGIN:.9g} rad')
             values = {n:min(self.limits[n]['upper'],max(self.limits[n]['lower'],v)) for n,v in values.items()}
             self.native[side] = (values,time.monotonic())
         except ValueError as error:
