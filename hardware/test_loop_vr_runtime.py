@@ -23,14 +23,17 @@ class LoopRuntimeTests(unittest.TestCase):
         from hardware.loop_vr_contract import GROUPS,TOPICS
         from hardware.loop_vr_streamer import main
         frames=[]
+        hand_frames=[]
         schemas=[]
         class Sink:
+            def __init__(self, target):self.target=target
             def stats(self):return SimpleNamespace(connected=True)
-            def send_robot(self,stamp,sequence,payload):frames.append((stamp,sequence,payload))
+            def send_robot(self,stamp,sequence,payload):self.target.append((stamp,sequence,payload))
+            def send_tactile(self,*args):raise AssertionError('fixture has no pressure; do not invent samples')
             def close(self):pass
         def connect(addr,schema,**kwargs):
             schemas.append(schema)
-            return Sink()
+            return Sink(hand_frames if schema.source_key.endswith('-hand') else frames)
         epoch=1792660000000000
         def spin(streamer):
             fixture=Node('loop_contract_fixture')
@@ -62,7 +65,12 @@ class LoopRuntimeTests(unittest.TestCase):
         with patch.object(SourceProducer,'connect',side_effect=connect),patch.object(rclpy,'spin',side_effect=spin),\
              patch('sys.argv',['loop-vr','--loop-addr','unused:50051','--robot-ip','127.0.0.1','--no-camera']):
             main()
-        self.assertEqual(len(schemas),1)
+        self.assertEqual(len(schemas),3)
+        self.assertEqual([s.kind.value for s in schemas],['robot','robot','tactile'])
+        self.assertEqual(schemas[2].tactile.name,'HX5-D20')
+        self.assertEqual([(f[0],f[1]) for f in frames],[(f[0],f[1]) for f in hand_frames])
+        self.assertTrue(all(not any('.left_hand.' in k or '.right_hand.' in k for k in f[2]) for f in frames))
+        self.assertTrue(all(not any('.left_arm.' in k or '.mobile.' in k for k in f[2]) for f in hand_frames))
         self.assertGreater(len(frames),50)
         prefix='ffw_sh5_vr.'
         active=[f for f in frames if f[2][prefix+'teleop.flags'][0]]

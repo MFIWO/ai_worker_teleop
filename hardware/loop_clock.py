@@ -29,10 +29,21 @@ class PCRecordingClock:
 
 class ClockedRobotStreamer:
     """Use the SDK's public SourceProducer.send_robot explicit timestamp API."""
-    def __init__(self, loop_addr, mapper, clock):
+    def __init__(self, loop_addr, mapper, clock, *, component='robot'):
         self.loop_addr,self.mapper,self.clock=loop_addr,mapper,clock
         self.producer=None
         self.sent_count=0
+        self.component=component
+
+    def owns_channel(self, key):
+        if key.endswith('.tactile_pressure'):
+            return False  # raw pressure belongs to a TACTILE source
+        if self.component == 'hand' and key.endswith(('.flags', '.phase', '.clock', '.ages')):
+            return True
+        parts = key.split('.')
+        hand = any(part in ('left_hand', 'right_hand') for part in parts)
+        hand = hand or key.endswith(('.controller_inputs', '.hand_pose_state'))
+        return hand if self.component == 'hand' else not hand
 
     @staticmethod
     def select_config(requested):
@@ -47,10 +58,12 @@ class ClockedRobotStreamer:
 
     def connect(self):
         from loop_sdk import ChannelSpec,RobotConfigOptions,RobotStreamSchema,SourceSchema,SourceProducer
-        schema=SourceSchema(robot=RobotStreamSchema(source_key='robotis-vr-sh5',name='AI Worker VR / '+HAND_MODEL,
+        hand = self.component == 'hand'
+        schema=SourceSchema(robot=RobotStreamSchema(source_key='robotis-vr-sh5-hand' if hand else 'robotis-vr-sh5',
+            name='AI Worker Hand / '+HAND_MODEL if hand else 'aiworker',
             channels=tuple(ChannelSpec(key=i.key,label=i.label,unit=i.unit,group=i.group,
                                       range=(0.,255.) if i.key.endswith('.tactile_pressure') else None)
-                           for i in self.mapper.channel_infos()),
+                           for i in self.mapper.channel_infos() if self.owns_channel(i.key)),
             available_options=RobotConfigOptions(action_space=('joint_position',),
                 robot_type=('ffw_sh5_vr',),finger_type=(HAND_MODEL,))))
         self.producer=SourceProducer.connect(self.loop_addr,schema,on_select=self.select_config)
@@ -61,10 +74,11 @@ class ClockedRobotStreamer:
         self.close()
         raise ConnectionError('Loop Source Bus did not connect')
 
-    def send(self,payload):
-        stamp=self.clock.timestamp(time.monotonic())
+    def send(self,payload, *, stamp=None):
+        if stamp is None:stamp=self.clock.timestamp(time.monotonic())
         if stamp is None:return False  # wait for the first PC heartbeat, not robot wall time
-        self.producer.send_robot(stamp,self.sent_count,dict(payload))
+        self.producer.send_robot(stamp,self.sent_count,
+                                 {k:v for k,v in payload.items() if self.owns_channel(k)})
         self.sent_count+=1
         return True
 
@@ -72,3 +86,70 @@ class ClockedRobotStreamer:
         if self.producer is not None:
             self.producer.close()
             self.producer=None
+
+
+class SplitRobotStreamer:
+    """Independent Loop sources with identical timestamps and sequence numbers."""
+    def __init__(self, loop_addr, mapper, clock):
+        self.clock = clock
+        self.streams = tuple(ClockedRobotStreamer(loop_addr, mapper, clock, component=part)
+                             for part in ('robot', 'hand')) + (ClockedTactileStreamer(loop_addr),)
+
+    @property
+    def sent_count(self):
+        return self.streams[0].sent_count
+
+    def connect(self):
+        try:
+            for stream in self.streams:stream.connect()
+        except Exception:
+            self.close()
+            raise
+
+    def send(self, payload):
+        stamp = self.clock.timestamp(time.monotonic())
+        if stamp is None:return False
+        for stream in self.streams:stream.send(payload, stamp=stamp)
+        return True
+
+    def close(self):
+        for stream in self.streams:stream.close()
+
+
+class ClockedTactileStreamer:
+    """Publish measured fingertip pressure on the SDK's typed tactile lane."""
+    def __init__(self, loop_addr):
+        self.loop_addr = loop_addr
+        self.producer = None
+        self.sent_count = 0
+
+    def connect(self):
+        from loop_sdk import SourceProducer, SourceSchema, TactileStreamSchema, TactileChannelSpec
+        schema = SourceSchema(tactile=TactileStreamSchema(
+            source_key='robotis-vr-sh5-tactile', name=HAND_MODEL,
+            channels=tuple(TactileChannelSpec(key=side+'_hand',
+                label=side+' fingers 1..5, row-major 3x3, raw 0..255',
+                sample_format='uint8', sample_count=45) for side in ('left', 'right'))))
+        self.producer = SourceProducer.connect(self.loop_addr, schema)
+        deadline = time.monotonic()+5
+        while time.monotonic() < deadline:
+            if self.producer.stats().connected:return
+            time.sleep(.1)
+        self.close()
+        raise ConnectionError('Loop tactile Source Bus did not connect')
+
+    def send(self, payload, *, stamp):
+        from loop_sdk import TactileChannelValue
+        channels = []
+        for side in ('left', 'right'):
+            values = payload.get(f'ffw_sh5_vr.observation.{side}_hand.tactile_pressure')
+            if values is not None:
+                channels.append(TactileChannelValue(key=side+'_hand', raw=bytes(values)))
+        # Missing pressure is omitted, never represented by fabricated zeros.
+        if channels:self.producer.send_tactile(stamp, self.sent_count, tuple(channels))
+        self.sent_count += 1
+
+    def close(self):
+        if self.producer is not None:
+            self.producer.close()
+            self.producer = None

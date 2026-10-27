@@ -43,7 +43,8 @@ def command(args,interactive):
     # stdin carries a lease; TTY detachment alone does not stop docker exec.
     terminal='-i'
     if args.side=='pc':
-        return ['docker','exec',terminal,'robotis-applications','bash',
+        display_env=['-e',f'DISPLAY={os.environ["DISPLAY"]}'] if os.environ.get('DISPLAY') else []
+        return ['docker','exec',terminal,*display_env,'robotis-applications','bash',
                 '/root/ros2_ws/src/robotis_applications/hardware/run_pc_session.sh',
                 '--pc-ip',args.pc_ip,'--robot-ip',args.robot_ip,'--loop',args.loop,'--input',args.input,'--hand-mode',args.hand_mode,'--host-lease']
     inner=['docker','exec',terminal,'ai_worker','bash',

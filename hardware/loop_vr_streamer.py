@@ -7,7 +7,7 @@ import tempfile
 import time
 
 from hardware.loop_vr_contract import RecordingStatus, vr_parameters
-from hardware.loop_clock import PCRecordingClock,ClockedRobotStreamer
+from hardware.loop_clock import PCRecordingClock,SplitRobotStreamer
 from hardware.hx5_tactile import HAND_MODEL,PRESSURE_TOPICS,TactileReadings,channel_layout
 
 
@@ -86,7 +86,7 @@ def main():
             self._qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT,history=HistoryPolicy.KEEP_LAST)
             self._init_subscribers()
             self._init_tactile_subscribers()
-            self.robot_streamer=ClockedRobotStreamer(self.loop_addr,self.mapper,self.recording_clock)
+            self.robot_streamer=SplitRobotStreamer(self.loop_addr,self.mapper,self.recording_clock)
             self.robot_streamer.connect()
             self.camera_streamer=None
             self._probe_started_at=time.monotonic()
