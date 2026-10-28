@@ -228,9 +228,19 @@ motion is already at zero, very small center drift is tracked slowly.
 The `[STICK INTENT]` log prints `mobile_zero`, `mobile_ready` and
 `filter`. Left stick selects **forward/back OR left/right**, never both.
 Yaw from the right stick is also suppressed while translation is active.
-Slew limits stop/restart movement gently, and brief reversed input after
-a release is rejected for 0.16 seconds. Loss of a fresh controller frame
-or ACTIVE gating disarms MOBILE and commands zero.
+[CHANGED 2026-10-28] The MOBILE setpoint is now jerk- and
+acceleration-clamped: discrete acceleration is `(v_k - v_(k-1))/dt`,
+and its step is limited by the declared per-axis `JERK` limit.
+During braking, each component approaches zero monotonically and is
+clamped at zero rather than crossing to the opposite sign. Reversing
+direction intentionally requires the stick to pass through neutral
+**after the previous commanded velocity reaches zero**, then a new
+opposite press. This is deliberately stricter than the old 0.16-second
+reversal timer, which could allow a long stick rebound to reverse.
+Yaw and translation also cannot overlap during a mode-direction change.
+A forced stop or invalid tracking sample can bypass a smooth jerk ramp
+to publish zero immediately. Loss of a fresh controller frame or ACTIVE
+gating disarms MOBILE and commands zero.
 
 A base moving *physically* backward while `/cmd_vel.linear.x` stays
 zero is **not** joystick drift: inspect `/odom`, swerve drive/controller
