@@ -84,8 +84,14 @@ class LoopVRTests(unittest.TestCase):
         cmd=command(args,False)
         self.assertEqual(cmd[0],'ssh')
         self.assertNotIn('--bringup',cmd[-1])
+        self.assertIn('--loop-channels training',cmd[-1])
         args.bringup=True
         self.assertIn('--bringup',command(args,False)[-1])
+        args.loop_channels='qpos'
+        args.loop_no_tactile=True
+        remote=command(args,False)[-1]
+        self.assertIn('--loop-channels qpos',remote)
+        self.assertIn('--loop-no-tactile',remote)
         with self.assertRaises(SystemExit),redirect_stderr(io.StringIO()):
             parser().parse_args(['pc','--pc-ip','192.168.5.2','--robot-ip','x;touch /tmp/unsafe'])
 
