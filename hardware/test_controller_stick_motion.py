@@ -107,6 +107,66 @@ class MobileTests(unittest.TestCase):
             self.assertFalse(abs(cmd[0]) > 1e-7 and abs(cmd[1]) > 1e-7)
         self.assertGreater(cmd[1], 0.)
 
+    def test_long_overshoot_never_reverses_without_neutral(self):
+        """[ADDED] Persistent release rebound must brake to 0, not back up."""
+        self.calibrate()
+        f = self.filter
+        for index in range(25):
+            f.update((-.95, -.09), self.neutral_right, now=.4 + .03 * index)
+        self.assertGreater(f.output[0], 0.)
+        outputs = []
+        for index in range(39):
+            # A negative input for >0.16s is not authorization to reverse.
+            cmd = f.update((.95, -.09), self.neutral_right,
+                           now=1.15 + .03 * index)
+            outputs.append(cmd[0])
+        self.assertTrue(all(v >= 0. for v in outputs))
+        self.assertTrue(all(old >= new for old, new in zip(outputs, outputs[1:])))
+        self.assertEqual(outputs[-1], 0.)
+        self.assertEqual(f.output[1:], (0., 0.))
+
+        # Operator releases both sticks, then deliberately presses reverse.
+        f.update(self.neutral_left, self.neutral_right, now=2.35)
+        self.assertEqual(f._direction[0], 0)
+        for index in range(12):
+            cmd = f.update((.95, -.09), self.neutral_right,
+                           now=2.38 + .03 * index)
+        self.assertLess(cmd[0], -.05)
+        self.assertEqual(cmd[1:], (0., 0.))
+
+    def test_jerk_limited_acceleration_and_release_no_sign_crossing(self):
+        """[ADDED] d(speed)/dt changes smoothly in acceleration, release only brakes."""
+        self.calibrate()
+        f = self.filter
+        velocity = []
+        for index in range(9):
+            velocity.append(f.update((-.95, -.09), self.neutral_right,
+                                     now=.4 + .03 * index)[0])
+        accelerations = [(b - a) / .03 for a, b in zip(velocity, velocity[1:])]
+        for a, b in zip(accelerations, accelerations[1:]):
+            self.assertLessEqual(abs(b - a), f.JERK[0] * .03 + 1e-8)
+
+        brakes = [f.update(self.neutral_left, self.neutral_right,
+                           now=.67 + .03 * index)[0] for index in range(20)]
+        self.assertTrue(all(v >= 0. for v in brakes))
+        self.assertTrue(all(old >= new for old, new in zip(brakes, brakes[1:])))
+        self.assertAlmostEqual(brakes[-1], 0.)
+
+    def test_yaw_to_forward_never_stacks_rotation_and_translation(self):
+        """[ADDED] Mode changes cannot blend old yaw and new straight travel."""
+        self.calibrate()
+        f = self.filter
+        for index in range(20):
+            f.update(self.neutral_left, (.08, -.95), now=.4 + .03 * index)
+        self.assertGreater(f.output[2], 0.)
+        for index in range(35):
+            v = f.update((-.95, -.09), (.08, -.95),
+                         now=1.0 + index * .03)
+            self.assertFalse(abs(v[2]) > 1e-7 and
+                             (abs(v[0]) > 1e-7 or abs(v[1]) > 1e-7))
+        self.assertGreater(f.output[0], 0.)
+        self.assertEqual(f.output[2], 0.)
+
     def test_biased_deflected_input_cannot_be_auto_zero(self):
         f = self.filter
         for now in (.0, .4, 1.):
