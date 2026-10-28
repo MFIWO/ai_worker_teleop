@@ -25,6 +25,7 @@ class HandMotionTests(unittest.TestCase):
         measured={n:0. for names in FINGER_NAMES.values() for n in names}
         hand.limits={n:dict(lower=-1.,upper=1.,velocity=.001) for n in measured}
         hand.previous,hand.preparing,hand.native={},{},{}
+        hand.last_trigger={}
         hand.active,hand.last_output=False,0.
         hand.publish=Mock()
         hand.node=SimpleNamespace(measured_rx=10.,intent_enabled=True,fault=None,latch=Mock())
@@ -57,21 +58,42 @@ class HandMotionTests(unittest.TestCase):
             hand.tick({},1.,True)
         hand.publish.assert_not_called()
 
-    def test_mode2_direct_targets_ignore_slew_and_hand_age_but_obey_global_hold(self):
+    def test_mode2_trigger_closing_half_velocity_release_and_pinch_unchanged(self):
+        # [CHANGED 2026-10-28] Only trigger CLOSING is rate-limited.
         hand=SH5HandOutput.__new__(SH5HandOutput)
         hand.mode,hand.hand_mode,hand.poses='controllers',2,POSES
         measured={n:0. for names in FINGER_NAMES.values() for n in names}
-        hand.limits={n:dict(lower=-4.,upper=4.,velocity=.001) for n in measured}
-        hand.previous,hand.preparing={},{}
+        hand.limits={n:dict(lower=-4.,upper=4.,velocity=2.) for n in measured}
+        hand.previous,hand.preparing,hand.last_trigger={},{},{}
         hand.active,hand.last_output=False,0.
-        hand.node=SimpleNamespace(measured_rx=10.)
+        hand.node=SimpleNamespace(measured_rx=10.3)
         hand.publish=Mock()
-        hand.controls=controls('full_grip',trigger=.8)
-        hand.rx=0.
+        hand.controls=controls('full_grip',trigger=1.)
+        hand.rx=0.  # Mode 2 does not add a separate .3s hand timeout.
         hand.tick(measured,10.,True)
+        target=targets(POSES,hand.controls)
+        first=dict(hand.publish.call_args.args[0])
+        for name,goal in target.items():
+            self.assertAlmostEqual(first[name],max(-.01,min(.01,goal)))
+
+        hand.tick(measured,10.1,True)
+        second=dict(hand.publish.call_args.args[0])
+        for name in measured:
+            self.assertLessEqual(abs(second[name]-first[name]),.1000001)
+            if abs(target[name])>.11:
+                self.assertNotAlmostEqual(second[name],target[name])
+
+        # Releasing the trigger is NOT deliberately slowed.
+        hand.controls=controls('full_grip',trigger=.25)
+        hand.tick(measured,10.2,True)
         self.assertEqual(hand.publish.call_args.args[0],targets(POSES,hand.controls))
-        hand.tick(measured,10.,False)
+        # Grip-pinch remains directly proportional and bypasses the trigger limit.
+        hand.controls=controls('full_grip',trigger=.25,grip=.4)
+        hand.tick(measured,10.3,True)
+        self.assertEqual(hand.publish.call_args.args[0],targets(POSES,hand.controls))
+        hand.tick(measured,10.4,False)
         self.assertFalse(hand.active)
+        self.assertFalse(hand.last_trigger)
         self.assertEqual(hand.publish.call_args.args[0],measured)
 
     def test_mode1_keeps_existing_velocity_limit_and_hand_timeout(self):
@@ -80,6 +102,7 @@ class HandMotionTests(unittest.TestCase):
         measured={n:0. for names in FINGER_NAMES.values() for n in names}
         hand.limits={n:dict(lower=-4.,upper=4.,velocity=.1) for n in measured}
         hand.previous,hand.preparing={},{}
+        hand.last_trigger={}
         hand.active,hand.last_output=False,0.
         hand.node=SimpleNamespace(measured_rx=1.)
         hand.publish=Mock()
