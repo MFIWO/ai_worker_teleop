@@ -140,6 +140,9 @@ def main():
     p.add_argument('--hand-mode',choices=('1','2'),default='1')
     p.add_argument('--hand-trace',action='store_true')
     p.add_argument('--loop-no-camera',action='store_true')
+    # CHANGED(2026-10-28): pass recording profile to the read-only Loop source.
+    p.add_argument('--loop-channels',default='training')
+    p.add_argument('--loop-no-tactile',action='store_true')
     p.add_argument('--host-lease',action='store_true',help=argparse.SUPPRESS)
     args=p.parse_args()
     os.environ['AI_WORKER_SH5_INPUT']=args.input
@@ -267,6 +270,8 @@ def main():
             loop=[sys.executable,'-m','hardware.loop_vr_streamer','--loop-addr',args.pc_ip+':50051',
                   '--robot-ip',args.robot_ip]
             if args.loop_no_camera:loop.append('--no-camera')
+            loop.extend(['--channels',args.loop_channels])
+            if args.loop_no_tactile:loop.append('--no-tactile')
             children.append(('VR Loop',start(loop)))
         print('[SESSION] PC/VR exit holds motion and keeps this robot session/follower running. '
               'Closing this robot terminal stops SH5 follower after 3s and verifies finger torque OFF. '
