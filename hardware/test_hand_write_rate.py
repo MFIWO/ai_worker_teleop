@@ -42,4 +42,48 @@ class HandWriteDeploymentTests(unittest.TestCase):
         self.assertEqual(patched.count('ReadMultiDxlData(period_ms)'),1)
 
 
+    def test_generated_cxx_caps_overrun_without_modifying_normal_reads(self):
+        # [ADDED] Compile/run the actual generated C++ source fragment offline.
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+        compiler=shutil.which('g++')
+        if not compiler:self.skipTest('g++ unavailable')
+        source=r'''#include <chrono>
+#include <cmath>
+namespace hardware_interface {enum class return_type { OK, ERROR }; }
+#define RCLCPP_ERROR_STREAM(logger, expr) do { (void)(logger); } while (0)
+struct Duration {double value; double seconds() const {return value;} };
+struct Probe {
+  int logger_=0;
+  double observed=-1.;
+  hardware_interface::return_type read(Duration period) {
+  double period_ms = period.seconds() * 1000;
+  observed = period_ms;
+  return hardware_interface::return_type::OK;
+  }
+};
+int main() {
+  Probe probe;
+  if (probe.read(Duration{.6})!=hardware_interface::return_type::OK ||
+      probe.observed!=60.) return 1;
+  if (probe.read(Duration{.01})!=hardware_interface::return_type::OK ||
+      probe.observed!=10.) return 2;
+  return 0;
+}
+'''
+        source=patch_hardware(source)
+        with tempfile.TemporaryDirectory() as d:
+            cpp=Path(d)/'probe.cpp';exe=Path(d)/'probe'
+            cpp.write_text(source.replace('  observed = period_ms;', '  observed = period_ms;'))
+            subprocess.run([compiler,'-std=c++17',str(cpp),'-o',str(exe)],
+                           check=True,capture_output=True)
+            env=dict(os.environ,AI_WORKER_HX5_READ_TIMEOUT_CAP_MS='60.0')
+            subprocess.run([str(exe)],check=True,env=env,capture_output=True)
+            env['AI_WORKER_HX5_READ_TIMEOUT_CAP_MS']='invalid'
+            bad=subprocess.run([str(exe)],env=env,capture_output=True)
+            self.assertEqual(bad.returncode,1)
+
+
 if __name__=='__main__':unittest.main()
