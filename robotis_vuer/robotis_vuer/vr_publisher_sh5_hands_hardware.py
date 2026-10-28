@@ -299,6 +299,12 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 return
             if not self._clutch_held:
                 try:
+                    # [CHANGED] Preserve inherited freshness/feedback/graph
+                    # guards during clutch HOLD. A frozen VR target is NOT
+                    # permission to drive with stale hardware feedback.
+                    if self._hold_for_tracking_gap():
+                        return
+                    self._graph_check()
                     # [CHANGED] Hold operator XY/orientation deltas when left
                     # grip is released. SH5 lift remains coupled via _snapshot.
                     self._snapshot()
@@ -355,7 +361,12 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                         # trigger the previous-frame tracking jump guard.
                         self._last_input = {}
                     if right_grip and not self._right_grip_held and not self._ready_rehome_pending:
-                        if self._tracking_input_state() == 'fresh':
+                        # [DEBUG] Require the robot supervisor actually to be
+                        # subscribed before disarming and emitting a one-shot
+                        # motion-recovery request. Missing server => no action.
+                        if self._ready_request_pub.get_subscription_count() == 0:
+                            self.get_logger().warning('[RIGHT GRIP] Ready supervisor missing; restart matching mode-2 robot launcher')
+                        elif self._tracking_input_state() == 'fresh':
                             self._set_arm_control_enabled(False, 'right grip requests arm ready pose')
                             self._ready_rehome_pending = True
                             self._ready_request_id = str(time.time_ns())
