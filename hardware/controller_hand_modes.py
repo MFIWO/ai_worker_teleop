@@ -1,8 +1,8 @@
 """Controller preset selection; no ROS or hardware side effects."""
 import time
 
-POSE_BUTTONS = {'X':'full_grip','Y':'angled_grip','B':'point','A':'thumb_out_grip'}
-POSE_CODES = {'full_grip':1,'angled_grip':2,'point':3,'thumb_out_grip':4}
+POSE_BUTTONS = {'X':'full_grip','Y':'angled_grip','A':'tripod_deep','B':'ulnar_pinch'}  # [CHANGED] A/B select new pinch targets
+POSE_CODES = {'full_grip':1,'angled_grip':2,'tripod_deep':3,'ulnar_pinch':4}  # [CHANGED] mode 2 codes
 BUTTON_RELEASE_GRACE = .15
 
 
