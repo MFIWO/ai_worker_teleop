@@ -92,7 +92,7 @@ def _loaded_bounds(loader, path, scale):
     return lower, upper, len(vertices)
 
 
-def enclose_collision_meshes(urdf_text: str, *, padding_m: float = 1e-6):
+def enclose_collision_meshes(urdf_text: str, *, padding_m: float = 1e-6, retain_mesh_links=()):
     """Return ``(urdf_xml, report)`` with an enclosing box for EACH collision mesh.
 
     Box axes remain the mesh's original axes. The mesh scale is baked into the
@@ -140,6 +140,10 @@ def enclose_collision_meshes(urdf_text: str, *, padding_m: float = 1e-6):
     # alias loader-cached geometry. Our own cache includes the complete scale.
     loader = coal.MeshLoader()
     unit_cache, scaled_cache, resources = {}, {}, {}
+    retained = []
+    retain_mesh_links = frozenset(retain_mesh_links)
+    if retain_mesh_links - {link.get('name') for link in root.findall('link')}:
+        raise ValueError('retained collision link is missing')
     entries = []
     mesh_count = len(root.findall('./link/collision/geometry/mesh'))
     for link in root.findall('link'):
@@ -179,6 +183,11 @@ def enclose_collision_meshes(urdf_text: str, *, padding_m: float = 1e-6):
                     raise ValueError(f'coal mesh scaling differs from verified local-axis semantics: {path}')
                 scaled_cache[key] = bounds
             lower, upper, count = scaled_cache[key]
+            if link.get('name') in retain_mesh_links:
+                retained.append({'link':link.get('name'),'collision_index':index,
+                    'mesh_sha256':resources[path][1],'resolved_mesh_path':str(path),
+                    'mesh_scale':scale.tolist(),'exact_original_mesh':True})
+                continue
             origin = collision.find('origin')
             if len(collision.findall('origin')) > 1:
                 raise ValueError('collision has more than one origin')
@@ -224,10 +233,11 @@ def enclose_collision_meshes(urdf_text: str, *, padding_m: float = 1e-6):
     for path, (before, _) in resources.items():
         if _stamp(path) != before:
             raise ValueError(f'mesh resource changed during conversion: {path}')
-    if len(entries) != mesh_count or root.findall('./link/collision/geometry/mesh'):
+    remaining = root.findall('./link/collision/geometry/mesh')
+    if len(entries)+len(retained) != mesh_count or len(remaining) != len(retained):
         raise ValueError('not every collision mesh was converted')
     report = {
-        'schema': 1, 'approximation': 'enclosing_mesh_axis_aligned_boxes',
+        'schema': 1, 'approximation': ('exact_selected_links_plus_enclosing_boxes' if retained else 'enclosing_mesh_axis_aligned_boxes'),
         'conservative': True, 'exact_mesh_geometry': False,
         'source_urdf_sha256': hashlib.sha256(urdf_text.encode()).hexdigest(),
         'coal_version': getattr(coal, '__version__', 'unknown'),
@@ -237,6 +247,6 @@ def enclose_collision_meshes(urdf_text: str, *, padding_m: float = 1e-6):
         'collision_pairs_changed': False, 'kinematics_changed': False,
         'visuals_changed': False, 'inertials_changed': False,
         'clearance_recheck_required': bool(entries), 'physical_motion_verified': False,
-        'meshes': entries,
+        'meshes': entries, 'retained_meshes': retained, 'retained_mesh_count':len(retained),
     }
     return ET.tostring(root, encoding='unicode'), report

@@ -221,6 +221,16 @@ class CollisionPrimitiveTests(unittest.TestCase):
         self.assertEqual(source, again)
         self.assertEqual(report['mesh_count'], 0)
 
+    def test_selected_base_mesh_is_preserved_without_disabling_pairs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'base.stl';_stl(path)
+            source=_xml(path)
+            output,report=enclose_collision_meshes(source,retain_mesh_links=('base_link',))
+            self.assertEqual(report['retained_mesh_count'],1)
+            self.assertFalse(report['collision_pairs_changed'])
+            before,after=ET.fromstring(source),ET.fromstring(output)
+            self.assertEqual(_signature(before.find('./link/collision')),_signature(after.find('./link/collision')))
+
     def test_actual_sh5_every_mesh_enclosed_and_frozen_kinematics_retained(self):
         value = os.environ.get('XR_COLLISION_TEST_URDF')
         path = Path(value or '/workspace/ai_worker_xr_validation/sh5_profile/sh5_hardware_arms.urdf')
@@ -244,7 +254,9 @@ class CollisionPrimitiveTests(unittest.TestCase):
                 self.assertEqual([_signature(e) for e in old.findall(tag)],
                                  [_signature(e) for e in new.findall(tag)])
         model, _ = _pin_geometry(output)
-        self.assertEqual((model.nq, model.nv), (15, 15))
+        original_model, _ = _pin_geometry(source)
+        self.assertEqual((model.nq, model.nv), (original_model.nq, original_model.nv))
+        self.assertEqual(list(model.names),list(original_model.names))
         self.assertTrue(all(x['conservative'] and x['all_vertices_enclosed'] for x in report['meshes']))
 
 

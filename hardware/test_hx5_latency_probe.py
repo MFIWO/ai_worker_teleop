@@ -48,6 +48,22 @@ class ProbeTests(unittest.TestCase):
             for f in range(5):
                 for j in range(6):self.assertIn((int(b), 1066+198*f+2*j, 2, 0), writes[:start])
 
+    def test_hand_only_read_failure_restores_saved_fields(self):
+        config, values, writes, read, write = self.fixture()
+        before = copy.deepcopy(values)
+        def fail_clock(i, a, n):
+            if a == 1078:
+                raise RuntimeError('injected clock timeout')
+            return read(i, a, n)
+        reports = []
+        with patch('hardware.hx5_latency_probe.time.monotonic', side_effect=itertools.count()):
+            with self.assertRaisesRegex(RuntimeError, 'clock timeout'):
+                probe(config, fail_clock, write,
+                      lambda d: reports.append(copy.deepcopy(d)),
+                      execute=True, duration=10., phases=[('hands_only', None)])
+        self.assertEqual(values, before)
+        self.assertTrue(reports[-1]['restored'])
+
     def test_setup_failure_still_restores_both_boards(self):
         config, values, writes, read, write = self.fixture()
         before = copy.deepcopy(values)

@@ -67,7 +67,7 @@ def make_files(model, controller_text, description_text, config):
     if p.get('lift_vel_bound', 0.0) != 0.0:
         raise ValueError('hardware arms-only commissioning requires the installed lift velocity bound0')
     # [CHANGED] Same wrist-centric retarget; untouched collision/CBF/startup parameters.
-    p['weight_elbow_position'] = 0.0
+    p['weight_elbow_position'] = 0.1 if model == 'sh5' else 0.0
     for s in SIDES:
         p[f'{s}_traj_topic'] = private_topic(model, s)
         p[f'{s}_raw_traj_topic'] = f'/xr_hardware/{model}/unused/{s}_gripper'
@@ -127,6 +127,9 @@ def main():
                 tool_collision_coverage='SH5 geometry from measured finger positions',
                 retained_movable_joints=[j.get('name') for j in ET.fromstring(urdf).findall('joint')
                                         if j.get('type') != 'fixed'])
+    if a.model == 'sh5':
+        from hardware.arm_posture import apply_limits
+        urdf, limits = apply_limits(urdf, limits)
     # [CHANGED] Diagnose wrong launch ORDER with the exact observed joint angle.
     # Do NOT loosen native limits or synthesize a corrected measured posture.
     for name, (lower, upper) in limits.items():
@@ -148,8 +151,11 @@ def main():
         # [ADDED] Exact SH5 meshes took ~2.7s per distance evaluation on the
         # checked PC. Enclosing boxes preserve coverage without a realtime hang.
         from hardware.collision_primitives import enclose_collision_meshes
-        urdf, approximation = enclose_collision_meshes(urdf)
+        urdf, approximation = enclose_collision_meshes(urdf, retain_mesh_links=('base_link',))
+        from hardware.base_collision_cover import refine_base
+        urdf, base_report = refine_base(urdf, a.output/'collision_meshes/base_cover.stl')
         model_report['collision_approximation'] = approximation
+        model_report['base_collision_cover'] = base_report
     paths = {'urdf': a.output / f'{a.model}_hardware_arms.urdf',
              'config': a.output / 'controller.yaml', 'srdf': a.output / 'controller.srdf'}
     contents = {'urdf': urdf, 'config': yaml.safe_dump(cfg, sort_keys=False), 'srdf': srdf}
@@ -182,13 +188,13 @@ def main():
                 'tracking_window_seconds': COMMAND_WINDOW_SECONDS,
                 'tracking_error_limits': {k: v * COMMAND_WINDOW_SECONDS for k, v in velocities.items()},
                 'angular_speed': ANGULAR_SPEED, 'workspace_fraction': 1.0 if a.model == 'sh5' else .94,
-                'arm_limit_policy': 'physical_description',
+                'arm_limit_policy': 'sh5_bent_elbow_v1' if a.model == 'sh5' else 'physical_description',
                 'source_urdf': str(a.controller_urdf.resolve()),
                 'source_urdf_sha256': sha256(a.controller_urdf),
                 'description_sha256': sha256(a.description), 'arm_dxl_ids': motor_ids,
                 'model_report': model_report,
                 'initial_collision_report': collision_report,
-                'tool_collision_coverage': ('SH5 collision meshes enclosed by conservative boxes; non-arm joints frozen at measured snapshot'
+                'tool_collision_coverage': ('SH5 covered base mesh plus conservative boxes; non-arm joints frozen at measured snapshot'
                                             if a.model == 'sh5' else 'installed SG2 Cyclo collision geometry'),
                 'physical_motion_verified': False}
     generated = ET.fromstring(urdf)
@@ -212,7 +218,7 @@ def main():
         manifest[k+'_sha256'] = sha256(p)
     (a.output/'profile.json').write_text(json.dumps(manifest, indent=2))
     print('[PROFILE]', a.output/'profile.json')
-    print('[PRESERVED] physical URDF position/velocity bounds, collision geometry, CBF and original source files')
+    print('[PRESERVED] physical velocity bounds, collision coverage, CBF and original source files; operational elbow range applied for SH5')
     print('[READINESS POLICY]', a.readiness_policy)
     print(f'[HARDWARE] Arm velocity uses verified URDF (max {max(velocities.values()):g}rad/s); '
           f'Cartesian speed caps are non-binding ({GOAL_SPEED:g}m/s, {ANGULAR_SPEED:g}rad/s); '

@@ -15,7 +15,7 @@ import time
 from hardware.hand_shutdown import assert_idle, configuration
 
 
-def probe(config, read, write, save, execute=False, duration=2., traffic=()):
+def probe(config, read, write, save, execute=False, duration=2., traffic=(), phases=None):
     state = dict(backups={}, phases={}, restored=False, torque_off=False)
     fields = [(8, 1), (70, 1)]
     fields += [(1030 + 198*f, 2) for f in range(5)]
@@ -51,10 +51,10 @@ def probe(config, read, write, save, execute=False, duration=2., traffic=()):
             set_field(ident, 8, 1, 0)
             set_field(ident, 70, 1, 1)
         # ID3 is the physical arm motor that correlated with the old stalls.
-        phases = [('hands_only', None), ('arm_model', (3, 0, 2)),
+        phases = ([('hands_only', None), ('arm_model', (3, 0, 2)),
                   ('arm_tick', (3, 120, 2)), ('arm_position', (3, 132, 4)),
                   ('arm_indirect', (3, 698, 11)),
-                  ('arm_indirect_short', (3, 698, 2))] + list(traffic)
+                  ('arm_indirect_short', (3, 698, 2))] if phases is None else list(phases)) + list(traffic)
         for label, extra in phases:
             rows = {b: [] for b in config['boards']}
             start = deadline = time.monotonic()
@@ -110,6 +110,7 @@ def main():
     parser.add_argument('--description', type=Path, required=True)
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--wrist-isolation', action='store_true', help='compare PH42 wrist IDs 7/37 with arm ID3; read-only motor traffic')
     parser.add_argument('--fast-arm-read', action='store_true', help='also compare Fast Sync/Bulk Read for external motors only')
     args = parser.parse_args()
     config = configuration(args.description.read_text())
@@ -141,6 +142,14 @@ def main():
         if not port.setBaudRate(config['baud']):
             raise RuntimeError('Baud setup failed')
         traffic = []
+        if args.wrist_isolation:
+            # Read model numbers as well as the deployed indirect feedback.
+            # The model read distinguishes an ID/model interaction from an
+            # unsupported feedback address or a particular payload length.
+            traffic += [(f'wrist{ident}_model', (ident, 0, 2))
+                        for ident in (7, 37)]
+            traffic += [(f'wrist{ident}_indirect', (ident, 698, 11))
+                        for ident in (7, 37)]
         if args.fast_arm_read:
             def fast_sync(ids):
                 def action():
@@ -151,7 +160,7 @@ def main():
                     if comm != 0:
                         raise RuntimeError(f'Fast Sync Read {ids}: {comm}')
                 return action
-            traffic = [('fast_arm3', fast_sync([3])),
+            traffic += [('fast_arm3', fast_sync([3])),
                        ('fast_right_arm', fast_sync(list(range(1, 8)))),
                        ('fast_both_arms', fast_sync(list(range(1, 8))+list(range(31, 38))))]
         state = probe(config, read, write, save, execute=args.execute, traffic=traffic)

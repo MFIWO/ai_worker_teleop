@@ -19,6 +19,7 @@ from tf2_msgs.msg import TFMessage
 from std_srvs.srv import Trigger
 from robotis_vuer.vr_publisher_sg2_xr_resume import XRResumePublisher
 from hardware.aux_controls import read_aux_limits
+from hardware.xr_contract import GOAL_SPEED, ANGULAR_SPEED
 
 from robotis_vuer.vr_publisher_ai_worker_hardware import HardwareXRPublisher
 from robotis_vuer.vr_publisher_sg2_xr import XRDeltaPublisher
@@ -99,8 +100,8 @@ class HardwarePublisherTests(unittest.TestCase):
 
     def test_hardware_capture_does_not_expand_elbow_or_shell(self):
         self.capture()
-        self.assertEqual(self.node.goal_speed,0.30)
-        self.assertEqual(self.node.angular_speed,1.50)
+        self.assertEqual(self.node.goal_speed,GOAL_SPEED)
+        self.assertEqual(self.node.angular_speed,ANGULAR_SPEED)
         for hint in self.node._session.templates.values():
             self.assertIsInstance(hint,AnchorRayHint)
             self.assertLessEqual(hint.maximum,.94*(hint.upper+hint.forearm)+1e-8)
@@ -215,6 +216,17 @@ class HardwarePublisherTests(unittest.TestCase):
         self.assertEqual(n.CONTROLLER_ACTIVATION_DELAY, 1.)
         self.assertEqual(n.WARMUP_HOLD_SECONDS, .8)
 
+    def test_SH5_operating_profile_requires_small_nonzero_elbow_weight(self):
+        n=self.node;n.hardware_model='sh5'
+        n._hardware_manifest={'urdf':'/test.urdf','srdf':'/test.srdf','arm_limit_policy':'sh5_bent_elbow_v1'}
+        from hardware.xr_contract import private_topic
+        values=[SimpleNamespace(string_value=s) for s in ('/test.urdf','/test.srdf','','','','arm_r_link7','arm_l_link7',private_topic('sh5','right'),private_topic('sh5','left'))]
+        for i,x in ((2,.1),(3,10.),(4,1.)):values[i]=SimpleNamespace(type=3,double_value=x)
+        values += [SimpleNamespace(type=3,double_value=0.),SimpleNamespace(type=3,double_value=.03)]
+        future=SimpleNamespace(result=lambda:SimpleNamespace(values=values))
+        n._profile_result(future);self.assertTrue(n._profile_verified)
+        values[2].double_value=0.;n._profile_result(future);self.assertFalse(n._profile_verified)
+
     def test_remote_epoch_joint_samples_are_fresh_only_by_receipt(self):
         n=self.node
         names=[f'arm_{s}_joint{i}' for s in ('l','r') for i in range(1,8)]
@@ -244,7 +256,7 @@ class HardwarePublisherTests(unittest.TestCase):
             with patch('time.monotonic',return_value=2.2):
                 n._tf_pose('arm_l_link7')
                 n._tf_received(TFMessage(transforms=[transform]))  # duplicate does not refresh
-            with patch('time.monotonic',return_value=2.6):
+            with patch('time.monotonic',return_value=2.+n.FEEDBACK_MAX_AGE+.1):
                 with self.assertRaisesRegex(ValueError,'TF updates stopped'):
                     n._tf_pose('arm_l_link7')
 
@@ -298,7 +310,7 @@ class HardwarePublisherTests(unittest.TestCase):
             with patch('time.monotonic',return_value=base+i/30):
                 previous=deepcopy(n._goals)
                 n._publish_synced_pose_frame_if_ready()
-                self.assertLess(np.linalg.norm(n._goals['left'][:3,3]-previous['left'][:3,3]),.02)
+                self.assertLessEqual(np.linalg.norm(n._goals['left'][:3,3]-previous['left'][:3,3]),min(n.goal_speed/30,.1)+1e-8)
                 if n._phase=='SETTLING': break
                 self.assertFalse(packets[-1]['enabled'])
         self.assertEqual(n._phase,'SETTLING')

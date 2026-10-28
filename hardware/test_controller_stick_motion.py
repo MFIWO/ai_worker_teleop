@@ -2,7 +2,7 @@
 import math
 import unittest
 
-from hardware.controller_stick_motion import MobileStickFilter, head_targets
+from hardware.controller_stick_motion import MobileStickFilter, head_targets, lift_target, BodyMotionPolicy
 
 
 HEAD = {
@@ -15,13 +15,14 @@ class HeadJogTests(unittest.TestCase):
     def test_uses_physical_urdf_and_time_based_rate(self):
         result = head_targets((1., -1.), None, (0., 0.), HEAD, 1 / 30)
         self.assertAlmostEqual(result[0], 0.01, places=5)
-        self.assertAlmostEqual(result[1], -0.01, places=5)
+        self.assertEqual(result[1], 0.)
         self.assertLess(result[0], 0.06)  # old per-event jump
 
     def test_saturates_not_stops_at_both_joint_bounds(self):
         result = head_targets((1., -1.), (.694, -.349), (0., 0.), HEAD, .1)
-        self.assertEqual(result, (.6951, -.35))
+        self.assertEqual(result, (.6951, -.349))
         self.assertEqual(head_targets((1., -1.), result, (0., 0.), HEAD, .033), result)
+        self.assertEqual(head_targets((0., -1.), result, (0.,0.), HEAD, .033),(.6951,-.35))
 
     def test_invalid_head_sample_and_missing_limits_fail(self):
         for stick in ((math.nan, 0.), (1.4, 0.)):
@@ -188,6 +189,41 @@ class MobileTests(unittest.TestCase):
         self.assertEqual(f.update(self.neutral_left, self.neutral_right, now=.1), (0., 0., 0.))
         self.assertFalse(f.ready)
 
+
+
+class RightDiagonalTests(unittest.TestCase):
+    def test_diagonal_lift_and_yaw_with_original_signs(self):
+        limits={'lift_joint':dict(lower=-.5,upper=0.,velocity=.3)}
+        f=MobileStickFilter();f.update((0.,0.),(0.,0.),now=0.);f.update((0.,0.),(0.,0.),now=.31)
+        target=-.25
+        for i in range(20):
+            target=lift_target(.707,target,-.25,limits,.03)
+            base=f.update((0.,0.),(.707,.707),now=.34+i*.03)
+        self.assertGreater(target,-.25)
+        self.assertLess(base[2],0.)
+        self.assertEqual(base[:2],(0.,0.))
+        self.assertLess(lift_target(-.707,None,-.25,limits,.03),-.25)
+
+    def test_lift_time_rate_bounds_and_bad_input(self):
+        limits={'lift_joint':dict(lower=-.5,upper=0.,velocity=.3)}
+        a=b=-.25
+        for _ in range(30):a=lift_target(.707,a,-.25,limits,1/30)
+        for _ in range(60):b=lift_target(.707,b,-.25,limits,1/60)
+        self.assertAlmostEqual(a,b)
+        self.assertEqual(lift_target(1.,-.001,0.,limits,.05),0.)
+        with self.assertRaises(ValueError):lift_target(float('nan'),None,-.25,limits,.03)
+
+
+class BodyMotionTests(unittest.TestCase):
+    def test_motion_hysteresis_and_measured_lift(self):
+        p=BodyMotionPolicy()
+        self.assertFalse(p.update(0.,(0.,0.,0.),-.2,None))
+        self.assertTrue(p.update(.1,(0.,0.,.1),-.2,None))
+        self.assertTrue(p.update(.2,(0.,0.,0.),-.2,None))
+        self.assertFalse(p.update(.4,(0.,0.,0.),-.2,None))
+        self.assertTrue(p.update(.5,(0.,0.,0.),-.21,None))
+        self.assertTrue(p.update(.6,(0.,0.,0.),-.21,-.25))
+        self.assertFalse(p.update(1.,(0.,0.,0.),-.21,-.21))
 
 if __name__ == '__main__':
     unittest.main()

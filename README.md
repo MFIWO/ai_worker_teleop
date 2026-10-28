@@ -2,7 +2,7 @@
 
 SH5 팔·손 VR Teleop과 Loop 녹화를 함께 배포하는 `main` 브랜치입니다.
 실행 명령과 다른 PC의 설치·업데이트 절차는
-[ai_worker_hand.txt](docs/ai_worker_hand.txt)에 있습니다.
+[ai_teleop_hand.txt](docs/ai_teleop_hand.txt)에 있습니다.
 문서 위쪽에는 실행 명령, 아래쪽에는 디버깅과 설정·업데이트 명령을 모았습니다.
 
 ## 실행
@@ -39,7 +39,8 @@ Quest 접속: `https://192.0.2.10:8012?ws=wss://192.0.2.10:8012`.
 맨손 입력은 HAND_MOVE에서 좌우 독립으로 즉시 처리합니다. mode 2는 최신 샘플을
 사용하고, 엄지 joint3/4를 추적 굽힘으로 고정한 18관절 최적화를 수행합니다.
 광학 손 mode 1/2에는 컨트롤러 mode 1의 0.85 속도 제한을 적용하지 않습니다.
-**관찰된 손 통신 지연은 아직 해결되지 않았습니다.**
+2026-10-29 사용자가 현재 운용 환경의 손 통신 지연 해결을 확인했습니다.
+과거 측정·진단 이력은 [HX5_LATENCY.md](hardware/HX5_LATENCY.md)에 남겨두었습니다.
 
 ## Loop와 종료
 
@@ -76,7 +77,7 @@ git pull --ff-only origin main
 bash hardware/install_pc.sh
 ```
 
-이후 [실행 문서 맨 아래](docs/ai_worker_hand.txt)의 **PC에서 로봇으로 배포**
+이후 [실행 문서 맨 아래](docs/ai_teleop_hand.txt)의 **PC에서 로봇으로 배포**
 명령을 실행해야 로봇 컨테이너도 갱신됩니다. 로컬 변경 때문에 pull이 거절되면
 해당 변경을 먼저 보존하세요. 새 PC에는 같은 문서의 최초 설치·인증서 생성도
 필요합니다. 기존 ROS Jazzy·Cyclo·SH5 모델/드라이버 환경을 사용하며,

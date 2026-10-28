@@ -358,7 +358,7 @@ class HardwareXRPublisher(XROverheadPublisher):
                     p['tracking_error_limits'] != {k: v * COMMAND_WINDOW_SECONDS for k, v in velocities.items()}):
                 raise ValueError('invalid per-joint URDF gate limits')
             if (self.hardware_model == 'sh5' and
-                    p.get('arm_limit_policy') != 'physical_description'):
+                    p.get('arm_limit_policy') not in ('physical_description','sh5_bent_elbow_v1')):
                 raise ValueError('Update robot launcher and regenerate the SH5 physical-limit profile')
             self._hardware_manifest = p
             self._gate_profile_rx = time.monotonic()
@@ -376,7 +376,7 @@ class HardwareXRPublisher(XROverheadPublisher):
                 raise ValueError('controller startup timing is unavailable')
             self._profile_verified = bool(p and
                 v[0].string_value == p['urdf'] and v[1].string_value == p['srdf'] and
-                v[2].type == 3 and v[2].double_value == 0.0 and
+                v[2].type == 3 and v[2].double_value == (0.1 if p.get('arm_limit_policy') == 'sh5_bent_elbow_v1' else 0.0) and
                 v[3].type == 3 and v[3].double_value == 10.0 and
                 v[4].type == 3 and v[4].double_value == 1.0 and
                 v[5].string_value == 'arm_r_link7' and v[6].string_value == 'arm_l_link7' and
@@ -541,7 +541,10 @@ class HardwareXRPublisher(XROverheadPublisher):
                 if not self._arm_tracking_is_fresh(now):
                     raise ValueError('tracking/feedback stopped during inactive resume preparation')
                 self._graph_check()
-                dt = max(.001, now-self._resume_bridge_rx)
+                # Inactive seed updates must also satisfy the native reference
+                # checker (10cm/30deg), even with nonbinding Cartesian rates.
+                dt = min(max(.001, now-self._resume_bridge_rx),
+                         .09/self.goal_speed, np.deg2rad(25.)/self.angular_speed)
                 for side in SIDES:
                     self._goals[side] = limited_pose(self._goals[side], self._resume_bridge_targets[side],
                                                     dt, self.goal_speed, self.angular_speed)

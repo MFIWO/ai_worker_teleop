@@ -58,12 +58,12 @@ class HardwareCommandGate(Node):
         if self.profile['hand_mode'] not in (1,2):
             raise ValueError('hand mode must be 1 or 2')
         if self.profile['model']=='sh5' and self.profile.get('finger_limits'):
-            from hardware.sh5_controller_hands import HAND_SPEED_SCALE
+            from hardware.sh5_controller_hands import HAND_SPEED_SCALE, MODE2_TRIGGER_CLOSE_SPEED_SCALE
             direct = self.profile['hand_input']=='hands' or self.profile['hand_mode']==2
             self.profile['hand_speed_scale'] = None if direct else HAND_SPEED_SCALE
             # [ADDED 2026-10-28] Diagnostic only: controller mode 2 trigger closing.
             self.profile['hand_trigger_close_scale'] = (
-                HAND_SPEED_SCALE*0.5 if self.profile['hand_input']=='controllers'
+                HAND_SPEED_SCALE*MODE2_TRIGGER_CLOSE_SPEED_SCALE if self.profile['hand_input']=='controllers'
                 and self.profile['hand_mode']==2 else None)
             self.profile['hand_output_policy'] = ('xr_ai_dexpilot' if self.profile['hand_input']=='hands' and self.profile['hand_mode']==2 else
                                                    'stock_robotis' if self.profile['hand_input']=='hands' else
@@ -183,6 +183,12 @@ class HardwareCommandGate(Node):
             return  # Replayed samples must not refresh the watchdog.
         self.measured = dict(zip(msg.name, msg.position))
         self.measured_stamp, self.measured_rx = stamp, time.monotonic()
+        if self.intent_enabled and self.profile.get('arm_limit_policy') == 'sh5_bent_elbow_v1':
+            for side in ('l','r'):
+                name=f'arm_{side}_joint4'
+                if self.measured[name] > self.profile['limits'][name][1]+.03:
+                    self.latch('measured elbow exceeded operational extension bound: '+name)
+                    return
         # [FIX] Old Cyclo caches name order from its FIRST JointState. Never feed
         # reordered/partial inputs or freshly stamped cached state without DXL health.
         canonical = self.profile['controller_joint_names']

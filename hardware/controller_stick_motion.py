@@ -29,6 +29,8 @@ def head_targets(stick, previous, measured, limits, elapsed, speed=0.30):
     names = ('head_joint1', 'head_joint2')
     if len(stick) != 2 or len(measured) != 2 or (previous is not None and len(previous) != 2):
         raise ValueError('expected two head axes and two measured positions')
+    # Left stick HEAD follows only its dominant axis, as MOBILE already does.
+    dominant = 0 if abs(float(stick[0])) >= abs(float(stick[1])) else 1
     targets = []
     for index, name in enumerate(names):
         if name not in limits:
@@ -38,7 +40,7 @@ def head_targets(stick, previous, measured, limits, elapsed, speed=0.30):
         base = float(measured[index] if previous is None else previous[index])
         if not math.isfinite(float(stick[index])) or abs(float(stick[index])) > 1.05:
             raise ValueError(f'{name}: invalid joystick input')
-        demand = _axis(float(stick[index]), 0.10)
+        demand = _axis(float(stick[index]), 0.10) if index == dominant else 0.0
         if (not all(map(math.isfinite, (lower, upper, velocity, base)))
                 or lower >= upper or velocity <= 0):
             raise ValueError(f'{name}: invalid live URDF limits/feedback')
@@ -209,3 +211,45 @@ class MobileStickFilter:
             self._idle_since = None
         self.reason = 'mobile command' if any(self.output) else 'mobile neutral'
         return self.output
+
+
+def lift_target(value, previous, measured, limits, elapsed, speed=.12):
+    """Right-stick lift independent of yaw; same sign, continuous diagonal input.
+
+    The prior >.95 edge test rejects a circular stick diagonal (~.707).
+    Integrate in metres/second instead of increments per WebXR event.
+    """
+    if not math.isfinite(elapsed) or elapsed <= 0 or not math.isfinite(speed) or speed <= 0:
+        raise ValueError('invalid lift timing/speed')
+    if not math.isfinite(value) or abs(value) > 1.05:
+        raise ValueError('invalid lift axis')
+    bound = limits['lift_joint']
+    lower,upper,velocity=(float(bound[k]) for k in ('lower','upper','velocity'))
+    base=float(measured if previous is None else previous)
+    if not all(map(math.isfinite,(lower,upper,velocity,base))) or lower>=upper or velocity<=0:
+        raise ValueError('invalid lift limit/feedback')
+    demand=_axis(value,.10)
+    return max(lower,min(upper,base+demand*min(speed,velocity)*min(elapsed,.05)))
+
+
+class BodyMotionPolicy:
+    """Keep elbows relaxed through commanded/observed chassis movement and settling."""
+    def __init__(self):
+        self.previous_lift = None
+        self.last_motion = -math.inf
+        self.active = False
+
+    def update(self, now, base, lift, lift_target_value):
+        values = (*base,lift,now)
+        if len(base)!=3 or not all(math.isfinite(float(v)) for v in values):
+            raise ValueError('invalid body motion observation')
+        moving = any(abs(v)>1e-5 for v in base)
+        if self.previous_lift is not None:
+            moving = moving or abs(lift-self.previous_lift)>.00005
+        if lift_target_value is not None:
+            if not math.isfinite(lift_target_value):raise ValueError('invalid lift target')
+            moving = moving or abs(lift_target_value-lift)>.002
+        self.previous_lift = lift
+        if moving:self.last_motion = now
+        self.active = moving or now-self.last_motion<.25
+        return self.active

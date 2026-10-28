@@ -215,10 +215,15 @@ class XRDeltaPublisher(VRTrajectoryPublisher):
             self._shoulder_drift_warned = warned
 
     def _graph_check(self):
-        for short in SIDES.values():
-            for topic in (f'/{short}_goal_pose', f'/{short}_subgoal_pose'):
-                if self.count_publishers(topic) != 1:
-                    raise ValueError(f'{topic} has another writer. Stop old Vuer and use Cyclo arm:=false')
+        # Inspect the actual publishers: SH5 hardware uses *_elbow_pose,
+        # whereas the original simulation/SG2 path uses *_subgoal_pose.
+        for side in SIDES:
+            for publisher in (self._goal_pub[side], self._elbow_pub[side]):
+                topic = publisher.topic_name
+                count = self.count_publishers(topic)
+                if count != 1:
+                    raise ValueError(f'{topic}: expected one target writer, found {count}. '
+                                     'Check publisher discovery and stop duplicate Vuer/arm publishers')
         if any(node == 'arm_retargeting_teleop' for node, _ in self.get_node_names_and_namespaces()):
             raise ValueError('legacy arm_retargeting_teleop still running; restart Cyclo with arm:=false')
 

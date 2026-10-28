@@ -1,8 +1,8 @@
 """Controller preset selection; no ROS or hardware side effects."""
 import time
 
-POSE_BUTTONS = {'X':'full_grip','Y':'angled_grip','A':'tripod_deep','B':'ulnar_pinch'}  # [CHANGED] A/B select new pinch targets
-POSE_CODES = {'full_grip':1,'angled_grip':2,'tripod_deep':3,'ulnar_pinch':4}  # [CHANGED] mode 2 codes
+POSE_BUTTONS = {'X':'index_pinch','Y':'ulnar_pinch','A':'pointing','B':'ready_pose'}
+POSE_CODES = {'full_grip':1,'angled_grip':2,'tripod_deep':3,'ulnar_pinch':4,'index_pinch':5,'pointing':6}  # [CHANGED] mode 2 codes
 BUTTON_RELEASE_GRACE = .15
 
 
@@ -40,8 +40,10 @@ class ControllerHandModes:
             self.chord = False
             if self.pending is not None and now-self.pending[1]>=BUTTON_RELEASE_GRACE:
                 button,_ = self.pending
-                self.selected = POSE_BUTTONS[button]
-                changed = (button,self.selected)
+                action = POSE_BUTTONS[button]
+                if action != 'ready_pose':
+                    self.selected = action
+                changed = (button,action)
                 self.pending = None
         self.previous = pressed
         return changed

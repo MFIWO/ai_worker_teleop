@@ -13,7 +13,7 @@ docker exec "$CONTAINER" mkdir -p "$DEST/hardware" "$DEST/robotis_vuer/robotis_v
 for source in "$HERE"/robotis_vuer/robotis_vuer/*.py; do
   docker cp "$source" "$CONTAINER:$DEST/robotis_vuer/robotis_vuer/$(basename "$source")"
 done
-for name in __init__.py xr_contract.py aux_controls.py sh5_model.py sh5_hands_model.py vuer_tls.py \
+for name in __init__.py arm_posture.py xr_contract.py aux_controls.py sh5_model.py sh5_hands_model.py vuer_tls.py \
             keyboard_controls.py teleop_cli.py pc_session.py session_processes.py ready_pose.py host_lease.py controller_hand_modes.py controller_stick_motion.py xr_hand_input.py; do
   docker cp "$HERE/hardware/$name" "$CONTAINER:$DEST/hardware/$name"
 done

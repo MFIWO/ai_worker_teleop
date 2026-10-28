@@ -4,6 +4,7 @@ HardwareXRPublisher retains capture, reanchor, wrist mapping, phase transitions,
 tracking grace, speed settings and gate verification. Only the WebXR input and
 finger landmark output are added here.
 """
+from copy import deepcopy
 import asyncio
 import json
 import os
@@ -14,7 +15,8 @@ from types import SimpleNamespace
 import numpy as np
 import rclpy
 from std_srvs.srv import SetBool
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
+from geometry_msgs.msg import PoseStamped
 from vuer.schemas import Body, Hands, Scene, MotionControllers
 
 from robotis_vuer.stock_sh5_hand import StockSH5HandInput
@@ -23,7 +25,8 @@ from robotis_vuer.vr_publisher_sg2 import VRTrajectoryPublisher
 from rclpy.signals import SignalHandlerOptions
 from hardware.keyboard_controls import MOTION_KEYS, keyboard_aux
 from hardware.controller_hand_modes import ControllerHandModes,POSE_CODES
-from hardware.controller_stick_motion import MobileStickFilter, head_targets  # [ADDED 2026-10-28]
+from robotis_vuer.xr_arm_targets import rigid_pose
+from hardware.controller_stick_motion import MobileStickFilter, head_targets, lift_target, BodyMotionPolicy  # [ADDED 2026-10-28]
 
 SIDES = ('left', 'right')
 
@@ -45,6 +48,8 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             raise ValueError('hand mode must be 1 or 2')
         self._hand_modes = ControllerHandModes()
         # [CHANGED] Mode-2 physical grips now control the arms, not fingers.
+        self._body_policy = BodyMotionPolicy()
+        self._body_motion = False
         self._clutch_held = False
         self._clutch_reanchor_pending = False
         self._right_grip_held = False
@@ -70,6 +75,10 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self._hand_previous = dict.fromkeys(SIDES)
         self._last_hand_event = None
         super().__init__(start_server=False)
+        # Hardware Cyclo subscribes *_elbow_pose, not the simulation *_subgoal_pose.
+        for side,short in (('left','l'),('right','r')):
+            self.destroy_publisher(self._elbow_pub[side])
+            self._elbow_pub[side] = self.create_publisher(PoseStamped,f'/{short}_elbow_pose',self.vr_stream_qos)
         # [CHANGED 2026-10-28] Full URDF lift travel, gentler 30Hz lift jog.
         self.right_jog_scale = 0.002  # was 0.005 m/event; ~0.06 m/s at 30 Hz
         if self._loop_controls or self._controller_mode:
@@ -91,14 +100,15 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self.create_service(SetBool, '/sh5_teleop/enable', self._enable_service)
         # [INTEGRATED PR #3] Robot-owned ready supervisor is controller mode-2 only.
         if self._controller_mode and self._hand_mode == 2:
+            self._body_elbow_pub = self.create_publisher(Bool, '/xr_hardware/body_elbows_relaxed', 1)
             self._ready_request_pub = self.create_publisher(String, '/xr_hardware/ready_request', 10)
             self.create_subscription(String, '/xr_hardware/ready_state', self._ready_feedback, 10)
         if self._controller_mode:
-            self.get_logger().info('[SH5 CONTROLLERS] X+A start/re-zero, Y+B HOLD; triggers select hand pose; left grip=arm clutch, right grip=ready request. Loop keys disabled.')
-            self.get_logger().info('[STICKS] Initial HEAD mode: left=head, right up/down=lift. Both stick clicks toggle MOBILE: left=translation, right left/right=yaw. Requires ACTIVE.')
+            self.get_logger().info('[SH5 CONTROLLERS] X+A start/re-zero, Y+B HOLD; triggers select hand pose; left grip=left arm enable while pressed, right grip=calibration. Loop keys disabled.')
+            self.get_logger().info('[STICKS] Initial HEAD mode: left=head, right up/down=lift. Both stick clicks toggle MOBILE: left=translation, right left/right=yaw, right up/down=lift. Requires ACTIVE.')
             self.get_logger().info(f'[HAND MODE {self._hand_mode}] '+(
                 'Original proportional trigger grasp; grip=thumb/index/middle pinch.' if self._hand_mode==1 else
-                'Tap X=full grip, Y=angled grip, A=thumb/index/middle pinch, B=thumb/ring/little pinch. Left grip=arm clutch; right grip=robot-owned ready request.'))
+                'Tap X=thumb/index/middle C-grip, Y=thumb/ring/little pinch, A=pointing, B=arm ready. Left grip=left arm enable while pressed; right grip=calibration.'))
         elif self._hand_mode==2:
             self.get_logger().info('[SH5 HANDS MODE 2] Fingers use xr_ai_teleop HX5 DexPilot; 25-point HAND_MOVE input, no BODY resampling. Existing arm path retained.')
         else:
@@ -165,10 +175,21 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 and bool((self._hardware_manifest or {}).get('manual_auxiliary')))
 
     def publish_right_joystick(self, thumbstick_value):
-        # Leader-style exclusive modes: HEAD has lift; MOBILE has yaw only.
-        # The inherited stick parser still handles axis swaps and mode clicks.
-        if self.joystick_mode:
-            super().publish_right_joystick(thumbstick_value)
+        # Only the RIGHT stick permits simultaneous lift/yaw. Keep the legacy
+        # lift sign and all mobile yaw acceleration/jerk/reversal filtering.
+        now = time.monotonic()
+        previous = getattr(self,'_lift_tick',None)
+        self._lift_tick = now
+        elapsed = self.control_min_period if previous is None else min(.05,max(.001,now-previous))
+        try:
+            target = lift_target(float(thumbstick_value),self.last_lift_command,
+                self.lift_joint_current_position,
+                (self._hardware_manifest or {}).get('auxiliary_limits',{}),elapsed)
+        except (KeyError,TypeError,ValueError,OverflowError) as error:
+            self.get_logger().warning('[LIFT JOG BLOCKED] '+str(error))
+            return
+        self._aux_joints['lift_joint'] = target
+        self.last_lift_command = target
 
     def publish_left_joystick_from_thumbstick(self, thumbstick_value):
         """Jog head in time-based increments within live URDF limits. [CHANGED 2026-10-28]"""
@@ -260,7 +281,6 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             enabled = self.arm_control_enabled and self._phase=='ACTIVE' and not self._controller_fault_latched
             hand_controls = controls if enabled else None
             if self._hand_mode==2:
-                if not enabled:self._hand_modes.reset_grasps()
                 if hand_controls is not None:hand_controls=self._hand_modes.controls(hand_controls)
             active_codes=[]
             for side in SIDES:
@@ -324,21 +344,54 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                     self._hand_modes.reset_grasps()
                     self._hand_modes.reset_buttons()
                     self.arm_start_armed = False
-                    self.get_logger().info('[RIGHT GRIP READY] Arms at ready pose; release grips and A/X, then press A+X to recapture the VR zero.')
+                    self.get_logger().info('[B READY] Arms at ready pose; release grips and A/X, then press A+X to recapture the VR zero.')
                 elif state == 'FAILED':
                     # Fail closed. Old commanded Cyclo q_desired cannot be reused.
-                    self.get_logger().error('[RIGHT GRIP RECOVERY FAILED] ' + str(report.get('message','inspect robot session')))
+                    self.get_logger().error('[B READY FAILED] ' + str(report.get('message','inspect robot session')))
                 elif state in ('WAIT_DISARM', 'MOVING', 'RESTARTING'):
-                    self.get_logger().info('[RIGHT GRIP] ' + state)
+                    self.get_logger().info('[B READY] ' + state)
             except (ValueError, TypeError, KeyError):
-                self.get_logger().warning('[RIGHT GRIP] invalid ready-state acknowledgement ignored')
+                self.get_logger().warning('[B READY] invalid ready-state acknowledgement ignored')
 
     def _set_arm_control_enabled(self, enabled, reason):
         # [CHANGED] Never enable mid-rehome while robot controller is restarting.
         if enabled and getattr(self, '_ready_rehome_pending', False):
-            self.get_logger().warning('[RIGHT GRIP] A+X blocked until measured ready-pose acknowledgement')
+            self.get_logger().warning('[B READY] A+X blocked until measured ready-pose acknowledgement')
             return
         return super()._set_arm_control_enabled(enabled, reason)
+
+    def _snapshot(self):
+        links = super()._snapshot()
+        if not (self._controller_mode and self._hand_mode == 2
+                and self._session is not None and hasattr(self,'_body_elbow_pub')):
+            return links
+        previous = self._body_motion
+        self._body_motion = self._body_policy.update(time.monotonic(),self._aux_base,
+            float(self.lift_joint_current_position),self._aux_joints.get('lift_joint'))
+        # Snapshot occurs before target generation. During body movement both
+        # elbow QP costs are reduced to 0.05, while hand/arm safety gates remain unchanged.
+        self._body_elbow_pub.publish(Bool(data=self._body_motion))
+        if self._body_motion or previous:
+            for side in SIDES:
+                self._elbows[side] = links[side]['elbow'].copy()
+                for hints in (self._hints,self._session.templates):
+                    hints[side].previous = links[side]['elbow'][:3,3].copy()
+                    hints[side].last_bend = None
+            if previous and not self._body_motion:
+                mapper = deepcopy(self._mapper)
+                for side in SIDES:
+                    mapper.anchors[side].input_pose = rigid_pose(getattr(self,side+'_controller_matrix'))
+                    mapper.anchors[side].robot_pose = rigid_pose(self._goals[side])
+                self._mapper = self._session.mapper = mapper
+                self._last_input = {}
+                self.get_logger().info('[BODY RESUME] Body settled; measured elbows recaptured, current controllers reanchored to held wrist goals')
+        return links
+
+    def _arm_input_enabled(self, side):
+        # Stop only the left Cartesian/ELBOW update; lift transport remains
+        # active in _snapshot and right arm tracking is independent.
+        return not (self._controller_mode and self._hand_mode == 2
+                    and (self._body_motion or (side == 'left' and not self._clutch_held)))
 
     def _publish_synced_pose_frame_if_ready(self):
         if not (self._controller_mode and self._hand_mode == 2
@@ -349,48 +402,30 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             now = time.monotonic()
             if self._last_pub is not None and now - self._last_pub < 1/30:
                 return
-            if not self._clutch_held:
+            if not self._clutch_held or self._clutch_reanchor_pending:
                 try:
-                    # [CHANGED] Preserve inherited freshness/feedback/graph
-                    # guards during clutch HOLD. A frozen VR target is NOT
-                    # permission to drive with stale hardware feedback.
                     if self._hold_for_tracking_gap():
                         return
                     self._graph_check()
-                    # [CHANGED] Hold operator XY/orientation deltas when left
-                    # grip is released. SH5 lift remains coupled via _snapshot.
+                    # Transport measured lift before copying/rebasing the left
+                    # mapper. Both wrist/elbow goals and workspace hints must
+                    # move with the chassis even while left input is disabled.
                     self._snapshot()
-                    self._publish_pair()
-                    self._last_pub = now
-                except Exception as error:
-                    self._set_arm_control_enabled(False, 'left grip HOLD: ' + str(error))
-                return
-            if self._clutch_reanchor_pending:
-                try:
-                    # [CHANGED] Recovery from XR tracking gaps must use the
-                    # same inherited hardware gate and graph checks as motion.
-                    if self._hold_for_tracking_gap():
-                        return
-                    self._graph_check()
-                    if (self._tracking_input_state(now) != 'fresh'
-                            or self._feedback_input_state(now) != 'fresh'):
-                        return
-                    links = self._snapshot()
-                    inputs = {side: np.asarray(getattr(self, side+'_controller_matrix')).copy()
-                              for side in SIDES}
-                    actual = {side: links[side]['wrist'] for side in SIDES}
-                    self._rezero_start_inputs(inputs, actual, 'left grip engaged (clutch)')
-                    for hints in (self._session.templates, self._hints):
-                        for side in SIDES:
-                            if hasattr(hints[side], 'path_anchor'):
-                                hints[side].path_anchor = self._goals[side][:3,3].copy()
+                    # Rebase LEFT only. Released grip maps every live pose to
+                    # the held left goal; pressing starts there without a jump.
+                    # The right anchor and its live motion remain untouched.
+                    mapper = deepcopy(self._mapper)
+                    mapper.anchors['left'].input_pose = rigid_pose(self.left_controller_matrix)
+                    mapper.anchors['left'].robot_pose = rigid_pose(self._goals['left'])
+                    self._mapper = self._session.mapper = mapper
+                    self._last_input.pop('left', None)
                     self._clutch_reanchor_pending = False
-                    self._publish_pair()
-                    self._last_pub = time.monotonic()
                 except Exception as error:
-                    self._set_arm_control_enabled(False, 'left grip reanchor refused: ' + str(error))
-                return
-        return super()._publish_synced_pose_frame_if_ready()
+                    self._set_arm_control_enabled(False, 'left clutch refused: ' + str(error))
+                    return
+            # Keep bilateral freshness, measured tracking, workspace, speed,
+            # controller feedback and graph checks in the inherited publisher.
+            return super()._publish_synced_pose_frame_if_ready()
 
     async def on_controller_move(self, event, session):
         if not self._controller_mode:
@@ -414,17 +449,25 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                         self._clutch_reanchor_pending = True
                     self._clutch_held = left_grip
                     if not left_grip:
-                        # [CHANGED] Moving VR hands while unclutched must not
-                        # trigger the previous-frame tracking jump guard.
-                        self._last_input = {}
+                        self._last_input.pop('left', None)
                     if right_grip and not self._right_grip_held and not self._ready_rehome_pending:
+                        if self.arm_control_enabled and self._phase == 'ACTIVE':
+                            try:
+                                if self._hold_for_tracking_gap():return
+                                self._graph_check()
+                                links = self._snapshot()
+                                inputs = {side: np.asarray(getattr(self,side+'_controller_matrix')).copy() for side in SIDES}
+                                self._rezero_start_inputs(inputs,{side:links[side]['wrist'] for side in SIDES},'right grip calibration')
+                            except Exception as error:
+                                self._set_arm_control_enabled(False,'calibration refused: '+str(error))
+                    if changed and changed[1] == 'ready_pose' and not self._ready_rehome_pending:
                         # [DEBUG] Require the robot supervisor actually to be
                         # subscribed before disarming and emitting a one-shot
                         # motion-recovery request. Missing server => no action.
                         if self._ready_request_pub.get_subscription_count() == 0:
-                            self.get_logger().warning('[RIGHT GRIP] Ready supervisor missing; restart matching mode-2 robot launcher')
+                            self.get_logger().warning('[B READY] Ready supervisor missing; restart matching mode-2 robot launcher')
                         elif self._tracking_input_state() == 'fresh':
-                            self._set_arm_control_enabled(False, 'right grip requests arm ready pose')
+                            self._set_arm_control_enabled(False, 'B requests arm ready pose')
                             self._ready_rehome_pending = True
                             self._ready_request_id = str(time.time_ns())
                             self._clutch_held = False
@@ -432,9 +475,9 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                             self._hand_modes.reset_grasps()
                             self._ready_request_pub.publish(String(data=json.dumps({
                                 'request_id': self._ready_request_id, 'action': 'ready_pose'})))
-                            self.get_logger().warning('[RIGHT GRIP] Arm HOLD; robot supervisor restarting controller around measured ready motion. A+X blocked.')
+                            self.get_logger().warning('[B READY] Arm HOLD; robot supervisor restarting controller around measured ready motion. A+X blocked.')
                         else:
-                            self.get_logger().warning('[RIGHT GRIP] Refused: stale body/controllers/robot feedback')
+                            self.get_logger().warning('[B READY] Refused: stale body/controllers/robot feedback')
                     self._right_grip_held = right_grip
                 else:
                     self._hand_modes.reset_buttons()
@@ -449,7 +492,6 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 was_head_mode = self.joystick_mode
                 VRTrajectoryPublisher.process_thumbstick(self)
                 if not self.joystick_mode:
-                    self._aux_joints.pop('lift_joint', None)
                     if was_head_mode:
                         # [CHANGED] A click must not leave a held HEAD command behind.
                         self._aux_joints.pop('head_joint1', None)
@@ -462,7 +504,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 # never an extra incremental head/lift jog in the click frame.
                 left = self.left_controller_state if isinstance(self.left_controller_state, dict) else {}
                 right = self.right_controller_state if isinstance(self.right_controller_state, dict) else {}
-                if self.joystick_mode and (left.get('thumbstick') or right.get('thumbstick')):
+                if left.get('thumbstick') or right.get('thumbstick'):
                     for name in ('head_joint1', 'head_joint2', 'lift_joint'):
                         self._aux_joints.pop(name, None)
                     self._head_target_clamped = self.last_head_command = self.last_lift_command = None
@@ -472,6 +514,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 self._aux_base = [0., 0., 0.]
                 self._aux_joints.clear()
                 self._head_target_clamped = self.last_head_command = self.last_lift_command = None
+                self._lift_tick = None
                 self._mobile_filter.disarm('not ACTIVE / fresh')
             self._report_sticks(now,allowed)
             self._heartbeat()

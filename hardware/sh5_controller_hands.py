@@ -10,13 +10,32 @@ HAND_TOPICS = {side: f'/leader/joint_trajectory_command_broadcaster_{side}_hand/
                for side in FINGER_NAMES}
 NATIVE_TOPICS = {side:f'/xr_hardware/sh5/native_{side}_hand' for side in FINGER_NAMES}
 HAND_SPEED_SCALE = .85
-# [CHANGED 2026-10-28] Controller mode 2 trigger CLOSING only: half the configured
+# [CHANGED 2026-10-28] Controller mode 2 trigger CLOSING only: one quarter of the configured
 # finger velocity. Optical modes, grip-pinch and opening are unaffected.
-MODE2_TRIGGER_CLOSE_SPEED_SCALE = .5
+MODE2_TRIGGER_CLOSE_SPEED_SCALE = .25
 # ROBOTIS DexPilotOptimizer.set_joint_limit expands bounds by 1e-3 rad.
 # Accept that solver margin at input, then clamp to the physical URDF bounds.
 # This never expands the limits of a command sent to the hand.
 NATIVE_SOLVER_MARGIN = 1e-3 + 1e-6
+
+
+EFFORT_TOPICS = {side:f'/effort_{side[0]}_controller/commands' for side in FINGER_NAMES}
+STOCK_HAND_CURRENT_RAW = 300.0  # Existing follower launch setting, NOT milliamps.
+
+def pointing_currents(controls):
+    """Trigger scales index current ceiling 150..300 raw, never above stock.
+
+    Keep the other sixteen motor ceilings at the original value. This changes
+    available holding current, not torque calibration or a physical force goal.
+    """
+    result = {}
+    for side,item in controls.items():
+        values=[STOCK_HAND_CURRENT_RAW]*20
+        if item.get('pose')=='pointing':
+            value=150.0+150.0*item['trigger']
+            values[4:8]=[value]*4
+        result[side]=values
+    return result
 
 
 def control_values(payload):
@@ -45,7 +64,7 @@ def load_poses(limits):
     if config.get('schema') not in (1,2) or config.get('model') != 'HX5-D20':
         raise ValueError('unsupported controller hand pose layout')
     for side,names in FINGER_NAMES.items():
-        expected = {'open','grasp','pinch'} | (set(POSE_CODES)|{'angled_prepare'} if config['schema']==2 else set())
+        expected = {'open','grasp','pinch'} | (set(POSE_CODES)|{'angled_prepare','pointing_prepare','index_prepare','full_prepare','ulnar_prepare'} if config['schema']==2 else set())
         if set(config['poses'][side]) != expected:
             raise ValueError('hand pose definitions missing')
         for pose in config['poses'][side].values():
@@ -65,7 +84,11 @@ def targets(poses,controls):
         depth = item['grip'] if mode == 'pinch' else item['trigger']
         # Mode 2: selecting angled grip establishes the C-shaped rest pose.
         # Trigger travel closes continuously from that pose, including release.
-        baseline = poses[side]['angled_prepare'] if mode=='angled_grip' else poses[side]['open']
+        baseline = (poses[side]['angled_prepare'] if mode=='angled_grip' else
+                    poses[side]['pointing_prepare'] if mode=='pointing' else
+                    poses[side]['index_prepare'] if mode=='index_pinch' else
+                    poses[side]['ulnar_prepare'] if mode=='ulnar_pinch' else
+                    poses[side]['full_prepare'] if mode=='full_grip' else poses[side]['open'])
         result.update({name: opened+depth*(closed-opened)
                        for name,opened,closed in zip(FINGER_NAMES[side],baseline,poses[side][mode])})
     return result
@@ -94,6 +117,26 @@ class SH5HandOutput:
             qos = QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT)
             self.subscriptions = [node.create_subscription(JointTrajectory,topic,
                 lambda msg,side=side:self.native_trajectory(side,msg),qos) for side,topic in NATIVE_TOPICS.items()]
+        self.effort_publishers = {}
+        if mode == 'controllers' and self.hand_mode == 2:
+            from std_msgs.msg import Float64MultiArray
+            self.effort_publishers = {side:node.create_publisher(Float64MultiArray,topic,1)
+                                      for side,topic in EFFORT_TOPICS.items()}
+        self.contact_goals = {}
+        self.tactile = None
+        if mode == 'controllers' and self.hand_mode == 2:
+            from hardware.hx5_tactile import TactileReadings, PRESSURE_TOPICS
+            self.tactile = TactileReadings(freshness=.3)
+            try:
+                from robotis_interfaces.msg import HandPressures
+            except ImportError:
+                node.get_logger().warning('HandPressures unavailable: pointing contact lock disabled')
+            else:
+                import time
+                self.pressure_subscriptions = [node.create_subscription(HandPressures, topic,
+                    lambda msg, side=side: self.tactile.receive(side,msg,time.monotonic()),
+                    QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT))
+                    for side,topic in PRESSURE_TOPICS.items()]
         self.controls = None
         self.rx = -math.inf
         self.previous = {}
@@ -103,8 +146,8 @@ class SH5HandOutput:
         node.get_logger().info('[SH5 HAND OUTPUT] '+(
             'Optical input callbacks only; no hand output timer or interpolation. Global HOLD/fault remains.'
             if self.mode=='hands' else
-            'Controller mode 2: trigger closure <= 50% of configured finger velocity; '
-            'opening and grip-pinch direct, global HOLD/fault retained.'
+            'Controller mode 2: trigger closure <= 25% of configured finger velocity; '
+            'continuous joint travel, bounded opening; global HOLD/fault retained.'
             if self.mode=='controllers' and self.hand_mode==2 else
             'Direct position relay; no added smoothing, slew or hand-age gate. Global HOLD/fault remains.'
             if self.direct_output else 'Mode 1: original hand velocity limits and input watchdog.'))
@@ -144,7 +187,18 @@ class SH5HandOutput:
             self.native.pop(side,None)
             if self.node.intent_enabled:self.node.latch(str(error))
 
+    def publish_effort(self):
+        if not getattr(self,'effort_publishers',None):return
+        from std_msgs.msg import Float64MultiArray
+        for side,values in pointing_currents(self.controls).items():
+            self.effort_publishers[side].publish(Float64MultiArray(data=values))
+
     def graph(self):
+        if getattr(self,'effort_publishers',None):
+            for topic in EFFORT_TOPICS.values():
+                writers=self.node.get_publishers_info_by_topic(topic)
+                if len(writers)!=1 or writers[0].node_name!=self.node.get_name():
+                    raise ValueError('hand current output requires one gate writer; stop other effort publishers')
         for topic in HAND_TOPICS.values():
             writers = self.node.get_publishers_info_by_topic(topic)
             if len(writers) != 1 or writers[0].node_name != self.node.get_name():
@@ -164,9 +218,14 @@ class SH5HandOutput:
 
     def hold(self,measured,fresh):
         if self.active and fresh:
-            self.publish(measured)
+            # Preserve commanded preload: measured angles can relax a loaded grasp.
+            held = dict(measured)
+            if self.mode == 'controllers' and self.hand_mode == 2:
+                held.update(self.previous)
+            self.publish(held)
         self.active = False
-        self.previous.clear()
+        if not (self.mode == 'controllers' and self.hand_mode == 2):
+            self.previous.clear()
         self.last_trigger.clear()  # [ADDED] Do not carry pre-HOLD trigger states to restart.
         self.preparing.clear()
 
@@ -178,7 +237,7 @@ class SH5HandOutput:
     def prepare_targets(self,desired,measured,now):
         for side,item in self.controls.items():
             pose = item.get('pose')
-            if pose not in ('tripod_deep', 'ulnar_pinch') or item['trigger']<=.02:  # [CHANGED] prepare both selected pinches
+            if pose != 'tripod_deep' or item['trigger']<=.02:  # [CHANGED] prepare both selected pinches
                 self.preparing.pop(side,None)
                 continue
             names=FINGER_NAMES[side]
@@ -197,7 +256,7 @@ class SH5HandOutput:
             if reached and now-state['start']>=.12:
                 state['done']=True
             else:
-                if now-state['start']>3.:
+                if now-state['start']>8.:
                     raise ValueError(f'{side}: {pose} preparation not reached; holding fingers')
                 desired.update(prep)
         return desired
@@ -220,29 +279,51 @@ class SH5HandOutput:
                   slew_aux(desired,self.previous,measured,self.limits,
                            now-self.last_output if self.active else .01))
         if self.mode=='controllers' and self.hand_mode==2:
-            # [CHANGED 2026-10-28] Mode 2 previously jumped directly to the
-            # target on every trigger sample. Bound the joint GOAL advance to
-            # 50% of the configured finger velocity while closing, without
-            # changing the final grasp angle, pinch override, or release speed.
+            # Bound every trigger output transition, including thumb prep and
+            # tiny trigger reversals. Direction comes from remaining joint
+            # travel, not noisy trigger derivatives. Release remains faster,
+            # but never jumps directly to a distant target.
             dt = now-self.last_output if self.active else .01
             for side,item in self.controls.items():
-                trigger = item['trigger']
-                closing = (item['grip']<=.05 and trigger>.02 and
-                           trigger>=self.last_trigger.get(side,0.)-1e-6)
-                if closing:
-                    names = FINGER_NAMES[side]
-                    # Thumb-out preparation must be allowed to reach its
-                    # measured position before the existing 3s preparation gate.
-                    prep = self.preparing.get(side)
-                    if prep is not None and not prep['done']:
-                        names = names[4:]
-                    if names:
-                        half_speed = {name:dict(self.limits[name],
-                            velocity=self.limits[name]['velocity']*
-                                     MODE2_TRIGGER_CLOSE_SPEED_SCALE) for name in names}
-                        limited = slew_aux({name:desired[name] for name in names},
-                                           self.previous,measured,half_speed,dt)
-                        output.update(limited)
-                self.last_trigger[side] = trigger if item['grip']<=.05 else 0.
+                if item['grip'] > .05:
+                    continue  # legacy mode-1 pinch override in offline callers
+                pose = item.get('pose','grasp')
+                baseline_name = {'angled_grip':'angled_prepare',
+                                 'pointing':'pointing_prepare',
+                                 'index_pinch':'index_prepare',
+                                 'full_grip':'full_prepare',
+                                 'ulnar_pinch':'ulnar_prepare'}.get(pose,'open')
+                baseline = self.poses[side][baseline_name]
+                closed = self.poses[side][pose]
+                paced = {}
+                for i,name in enumerate(FINGER_NAMES[side]):
+                    old = self.previous.get(name,measured[name])
+                    opening = (desired[name]-old)*(closed[i]-baseline[i]) < -1e-9
+                    scale = 1.0 if opening else MODE2_TRIGGER_CLOSE_SPEED_SCALE
+                    paced[name] = dict(self.limits[name],velocity=self.limits[name]['velocity']*scale)
+                output.update(slew_aux({n:desired[n] for n in FINGER_NAMES[side]},
+                                       self.previous,measured,paced,dt))
+                self.last_trigger[side] = item['trigger']
+        if self.mode == 'controllers' and self.hand_mode == 2:
+            self.lock_pointing_contact(output,now)
+        self.publish_effort()
         self.publish(output)
         self.previous,self.last_output,self.active = output,now,True
+
+    def lock_pointing_contact(self, output, now):
+        """Hold the configured index pose while trigger is held, even without tactile.
+
+        Enter the straight pose through the existing velocity bound first.
+        Never capture a deflected measured finger as the new holding target.
+        Current ceilings are handled separately and never exceed stock 300 raw.
+        """
+        if not hasattr(self,'contact_goals'):self.contact_goals={}
+        for side,item in self.controls.items():
+            if item.get('pose')!='pointing' or item['trigger']<=.02:
+                self.contact_goals.pop(side,None)
+                continue
+            names=FINGER_NAMES[side][4:8]
+            goal=dict(zip(names,self.poses[side]['pointing'][4:8]))
+            if side not in self.contact_goals and all(abs(output[n]-goal[n])<=1e-6 for n in names):
+                self.contact_goals[side]=goal
+            output.update(self.contact_goals.get(side,{}))

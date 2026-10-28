@@ -243,6 +243,9 @@ def load_profile(path):
         key = 'manual_collision_urdf'
         if not profile.get(key) or sha256(profile[key]) != profile.get(key + '_sha256'):
             raise ValueError('Manual collision description missing/changed; regenerate profile')
+    cover = profile.get('model_report',{}).get('base_collision_cover')
+    if cover and sha256(cover['proxy_path']) != cover['proxy_sha256']:
+        raise ValueError('base collision cover changed since profile generation')
     positions, velocities = arm_limits(Path(profile['urdf']).read_text())
     if profile['limits'] != positions:
         raise ValueError('profile position limits differ from verified URDF')
@@ -282,9 +285,13 @@ def load_profile(path):
         if not description.is_file() or sha256(description) != profile['description_sha256']:
             raise ValueError('SH5 physical description missing/changed; regenerate the profile')
         physical_positions, physical_velocities = arm_limits(description.read_text())
-        if (profile.get('arm_limit_policy') != 'physical_description' or
-                positions != physical_positions or velocities != physical_velocities):
-            raise ValueError('SH5 profile must use physical URDF arm limits; regenerate the profile')
+        from hardware.arm_posture import POLICY, operating_limits
+        policy = profile.get('arm_limit_policy')
+        expected_positions = (operating_limits(physical_positions) if policy == POLICY
+                              else physical_positions)
+        if (policy not in ('physical_description',POLICY) or
+                positions != expected_positions or velocities != physical_velocities):
+            raise ValueError('SH5 profile differs from verified physical/operational bounds; regenerate')
     if profile.get('hand_control') is not None:
         from hardware.sh5_hands_model import verify_hand_profile
         verify_hand_profile(profile)

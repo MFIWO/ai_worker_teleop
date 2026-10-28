@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from hardware.build_startup_timing import SOURCE, CPP, HEADER, patch_source, patch_header, sha
+from hardware.build_startup_timing import SOURCE, CPP, HEADER, patch_source, patch_header as timing_patch_header, sha
 
 ROOT = Path('/workspace/ai_worker_xr_sh5_hands')
 CORE = SOURCE.parent / 'cyclo_motion_controller_core'
@@ -75,6 +75,15 @@ def replace_once(text, old, new):
     return text.replace(old, new)
 
 
+def patch_header(text):
+    text = timing_patch_header(text)
+    text = '#include <atomic>\n' + text
+    return replace_once(text, '  double weight_elbow_position_;',
+        '  double weight_elbow_position_;\n'
+        '  std::atomic_bool body_elbows_relaxed_{false};\n'
+        '  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr body_elbow_sub_;')
+
+
 def patched_source(text):
     text = patch_source(text)  # Exact same timing changes as the existing arm node.
     anchor = '  left_arm_joints_.clear();'
@@ -112,6 +121,18 @@ def patched_source(text):
       }
     }
 ''' + anchor)
+    text = replace_once(text, '  left_arm_joints_.clear();',
+        '  body_elbow_sub_ = this->create_subscription<std_msgs::msg::Bool>(\n'
+        '    "/xr_hardware/body_elbows_relaxed", 1,\n'
+        '    [this](std_msgs::msg::Bool::SharedPtr msg) {\n'
+        '      body_elbows_relaxed_.store(msg->data);\n'
+        '    });\n'
+        '  left_arm_joints_.clear();')
+    for side in ('right','left'):
+        text = replace_once(text,
+            f'    weight_{side}_elbow.head(3).setConstant(weight_elbow_position_);',
+            f'    weight_{side}_elbow.head(3).setConstant(\n'
+            '      body_elbows_relaxed_.load() ? 0.05 : weight_elbow_position_);')
     return text
 
 

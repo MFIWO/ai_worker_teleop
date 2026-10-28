@@ -78,6 +78,9 @@ class XROverheadPublisher(XRGuidedPublisher):
                                  f'{dp*1000:.1f}mm/{np.rad2deg(dr):.1f}deg')
         return inputs, actual
 
+    def _arm_input_enabled(self, side):
+        return True
+
     def _publish_synced_pose_frame_if_ready(self):
         if (not getattr(self, '_path_ready', False) or not self.arm_control_enabled
                 or self._mapper is None or self._phase != 'ACTIVE'):
@@ -108,6 +111,20 @@ class XROverheadPublisher(XRGuidedPublisher):
                         raise ValueError(f'{side} wrist tracking error exceeds0.25m')
                     if Rotation.from_matrix(goals[side][:3, :3] @ actual[side][:3, :3].T).magnitude() > self.TRACKING_ROTATION_LIMIT_RAD:
                         raise ValueError(f'{side} wrist orientation tracking error exceeds90deg')
+                    if not self._arm_input_enabled(side):
+                        # _snapshot already transported wrist AND elbow with
+                        # measured lift. Do not solve a new redundancy elbow
+                        # while this arm's operator input is clutched out.
+                        frame[side] = {
+                            'input_pose_webxr': inputs[side].tolist(),
+                            'raw_pose_base': goals[side].tolist(),
+                            'workspace_pose_base': goals[side].tolist(),
+                            'published_pose_base': goals[side].tolist(),
+                            'actual_pose_base': actual[side].tolist(),
+                            'workspace_clipped_m': 0., 'filtered_step_fraction': 1.,
+                            'clutch_hold': True,
+                        }
+                        continue
                     raw = self._mapper.target(side, inputs[side])
                     requested = raw.copy()
                     requested[:3, 3], clipped = hint.project_wrist(raw[:3, 3])

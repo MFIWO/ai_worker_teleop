@@ -75,6 +75,15 @@ class GateTests(unittest.TestCase):
         self.gate.tick()
         self.assertTrue(self.gate.output_active)
 
+    def test_measured_elbow_over_operational_limit_latches_fault(self):
+        self.gate.profile['arm_limit_policy']='sh5_bent_elbow_v1'
+        self.gate.intent_enabled=True
+        values=dict(self.gate.measured);values['arm_l_joint4']=.1
+        msg=JointState();msg.header.stamp.sec=1;msg.name=list(values);msg.position=list(values.values())
+        self.gate.joints(msg)
+        self.assertIn('operational extension bound',self.gate.fault)
+        self.assertFalse(self.gate.output_active)
+
     def test_default_is_disarmed(self):
         self.gate.tick();self.assertEqual(self.sent,[])
 

@@ -1,0 +1,36 @@
+Current controller mode 2 behavior (2026-10-29)
+
+A+X starts/resumes; B+Y HOLD preserves last commanded finger targets.
+Left grip enables left-arm tracking while held and reanchors left only.
+Right grip reanchors current controller inputs while ACTIVE.
+B requests the robot-owned ready supervisor; A+X manually resumes after ready.
+
+A: pointing. After bounded entry, index goal remains at the configured pose
+while trigger is held. Index current ceiling150..300 raw follows trigger;
+other motor ceilings retain stock300. Physical stiffness is not guaranteed.
+
+X: original mode1 grip-pinch path for thumb/index/middle, including original
+spread/roll. Starts25% along the thumb path and15% along index/middle paths.
+Ring/little remain folded at the same rest/closed positions.
+
+Y: thumb/ring/little close simultaneously and proportionally. Thumb joint1/2
+are fixed at stock grasp orientation in rest and closed poses; only thumb
+joint3/4 flex from mirrored0.12 to1.0 rad. No thumb-first stage.
+
+Mode2 trigger closing speed is25% of0.85 times each URDF velocity bound;
+opening uses the normal bounded velocity. Mode1 poses are unchanged.
+Right stick supports combined lift/yaw in MOBILE, lift nominal0.12 m/s.
+Left HEAD uses its dominant axis; existing MOBILE axis lock remains.
+
+Body motion holds/transports wrist targets using measured lift, refreshes
+elbow references, waits250 ms settling and reanchors current inputs.
+Normal elbow position weight0.10; body-motion weight0.05, neverzero.
+SH5 joint4 upper operating bound-0.45 rad is enforced by QP and gate.
+Weak arm posture cost0.02; rest elbow reference-1.57 rad.
+Hardware elbow topics are /l_elbow_pose and /r_elbow_pose.
+The base uses a conservative triangle-AABB cover with resource hashes.
+
+Full deployment instructions: docs/ai_teleop_hand.txt.
+Robot hand pose JSON changes need source installation and session restart.
+SH5 solver/posture changes additionally need build_sh5_hands --rebuild.
+Physical fingertip contact and load performance require robot observation.

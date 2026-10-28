@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock
 
 from hardware.controller_hand_modes import ControllerHandModes
-from hardware.sh5_controller_hands import SH5HandOutput, targets
+from hardware.sh5_controller_hands import SH5HandOutput, targets, pointing_currents
 from hardware.sh5_hands_model import FINGER_NAMES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,7 +58,7 @@ class HandMotionTests(unittest.TestCase):
             hand.tick({},1.,True)
         hand.publish.assert_not_called()
 
-    def test_mode2_trigger_closing_half_velocity_release_and_pinch_unchanged(self):
+    def test_mode2_trigger_closing_quarter_velocity_and_bounded_release(self):
         # [CHANGED 2026-10-28] Only trigger CLOSING is rate-limited.
         hand=SH5HandOutput.__new__(SH5HandOutput)
         hand.mode,hand.hand_mode,hand.poses='controllers',2,POSES
@@ -74,27 +74,32 @@ class HandMotionTests(unittest.TestCase):
         target=targets(POSES,hand.controls)
         first=dict(hand.publish.call_args.args[0])
         for name,goal in target.items():
-            self.assertAlmostEqual(first[name],max(-.01,min(.01,goal)))
+            self.assertAlmostEqual(first[name],max(-.005,min(.005,goal)))
 
         hand.tick(measured,10.1,True)
         second=dict(hand.publish.call_args.args[0])
         for name in measured:
-            self.assertLessEqual(abs(second[name]-first[name]),.1000001)
+            self.assertLessEqual(abs(second[name]-first[name]),.0500001)
             if abs(target[name])>.11:
                 self.assertNotAlmostEqual(second[name],target[name])
 
-        # Releasing the trigger is NOT deliberately slowed.
+        # A trigger reduction must not bypass the remaining close ramp.
         hand.controls=controls('full_grip',trigger=.25)
         hand.tick(measured,10.2,True)
-        self.assertEqual(hand.publish.call_args.args[0],targets(POSES,hand.controls))
+        third=dict(hand.publish.call_args.args[0])
+        for name in measured:
+            self.assertLessEqual(abs(third[name]-second[name]),.2000001)
         # Grip-pinch remains directly proportional and bypasses the trigger limit.
         hand.controls=controls('full_grip',trigger=.25,grip=.4)
         hand.tick(measured,10.3,True)
         self.assertEqual(hand.publish.call_args.args[0],targets(POSES,hand.controls))
+        held = dict(hand.publish.call_args.args[0])
         hand.tick(measured,10.4,False)
         self.assertFalse(hand.active)
         self.assertFalse(hand.last_trigger)
-        self.assertEqual(hand.publish.call_args.args[0],measured)
+        self.assertEqual(hand.publish.call_args.args[0],held)
+        hand.tick(measured,10.5,False)
+        self.assertEqual(hand.publish.call_args.args[0],held)
 
     def test_mode1_keeps_existing_velocity_limit_and_hand_timeout(self):
         hand=SH5HandOutput.__new__(SH5HandOutput)
@@ -146,12 +151,12 @@ class HandMotionTests(unittest.TestCase):
         modes.buttons({'bButton':True},{},now=0.)
         self.assertIsNone(modes.buttons({},{},now=.1))
         self.assertIsNone(modes.buttons({},{},now=.2))
-        self.assertEqual(modes.buttons({},{},now=.3),('Y','angled_grip'))
+        self.assertEqual(modes.buttons({},{},now=.3),('Y','ulnar_pinch'))
         modes.buttons({},{'bButton':True},now=.4)
         modes.buttons({},{},now=.5)
         modes.reset_buttons()
         self.assertIsNone(modes.buttons({},{},now=1.))
-        self.assertEqual(modes.selected,'angled_grip')
+        self.assertEqual(modes.selected,'ulnar_pinch')
 
     def test_late_single_button_tail_after_chord_is_ignored(self):
         modes=ControllerHandModes()
@@ -162,10 +167,10 @@ class HandMotionTests(unittest.TestCase):
         self.assertIsNone(modes.buttons({},{},now=.5))
         self.assertEqual(modes.selected,'full_grip')
 
-    def test_A_B_select_expected_distinct_tripod_and_ulnar_pinches(self):
-        for button,expected in (('A','tripod_deep'),('B','ulnar_pinch')):
+    def test_A_X_Y_select_requested_finger_poses(self):
+        for button,expected in (('A','pointing'),('X','index_pinch'),('Y','ulnar_pinch')):
             modes=ControllerHandModes()
-            left,right=({}, {'aButton':True} if button=='A' else {'bButton':True})
+            left,right=({'aButton':True}, {}) if button=='X' else (({'bButton':True}, {}) if button=='Y' else ({}, {'aButton':True}))
             modes.buttons(left,right,now=0.)
             modes.buttons({},{},now=.01)
             self.assertEqual(modes.buttons({},{},now=.20),(button,expected))
@@ -198,7 +203,7 @@ class HandMotionTests(unittest.TestCase):
         selected=targets(POSES,hand.controls)
         for side,names in FINGER_NAMES.items():
             self.assertAlmostEqual(selected[names[13]],.7*POSES[side]['ulnar_pinch'][13]
-                                   +.3*POSES[side]['open'][13])
+                                   +.3*POSES[side]['ulnar_prepare'][13])
 
     def test_c_shape_at_rest_and_proportional_close(self):
         for depth in (0., .01, .25, .5, 1.):
@@ -233,28 +238,302 @@ class HandMotionTests(unittest.TestCase):
         modes.buttons({},{},now=.2)
         result=modes.controls({'left':dict(trigger=1.,grip=0.),'right':dict(trigger=0.,grip=0.)})
         self.assertEqual(result['left']['pose'],'full_grip')
-        self.assertEqual(result['right']['pose'],'angled_grip')
+        self.assertEqual(result['right']['pose'],'ulnar_pinch')
 
-    def test_sh5_lift_only_in_head_mode(self):
+    def test_sh5_lift_available_in_both_modes(self):
+        from hardware.controller_stick_motion import lift_target
         path=ROOT/'robotis_vuer/robotis_vuer/vr_publisher_sh5_hands_hardware.py'
-        if not path.exists():self.skipTest('PC publisher source not installed in robot-only checkout')
-        source=ast.parse(path.read_text())
-        cls=next(n for n in source.body if isinstance(n,ast.ClassDef))
+        cls=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef))
         method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='publish_right_joystick')
-        class Base:
-            def publish_right_joystick(self,value):self.output.append(value)
-        isolated=ast.Module(body=[ast.ClassDef(name='Publisher',bases=[ast.Name(id='Base',ctx=ast.Load())],
-            keywords=[],body=[method],decorator_list=[])],type_ignores=[])
-        scope={'Base':Base}
+        isolated=ast.Module(body=[ast.ClassDef(name='Publisher',bases=[],keywords=[],body=[method],decorator_list=[])],type_ignores=[])
+        scope={'time':SimpleNamespace(monotonic=lambda:10.),'lift_target':lift_target}
         exec(compile(ast.fix_missing_locations(isolated),str(path),'exec'),scope)
-        publisher=scope['Publisher']()
-        publisher.output=[]
-        publisher.joystick_mode=False
-        publisher.publish_right_joystick(1.)
-        self.assertEqual(publisher.output,[])
-        publisher.joystick_mode=True
-        publisher.publish_right_joystick(1.)
-        self.assertEqual(publisher.output,[1.])
+        n=scope['Publisher']();n.control_min_period=1/30;n.last_lift_command=None
+        n.lift_joint_current_position=-.25;n._aux_joints={}
+        n._hardware_manifest={'auxiliary_limits':{'lift_joint':dict(lower=-.5,upper=0.,velocity=.3)}}
+        n.get_logger=lambda:SimpleNamespace(warning=Mock())
+        for mode in (False,True):
+            n.joystick_mode=mode;n._lift_tick=None;n.last_lift_command=None
+            n.publish_right_joystick(.707)
+            self.assertGreater(n._aux_joints['lift_joint'],-.25)
 
+    def test_B_ready_action_preserves_selected_grasp(self):
+        modes=ControllerHandModes()
+        modes.selected='index_pinch'
+        modes.buttons({},{'bButton':True},now=0.)
+        modes.buttons({},{},now=.01)
+        self.assertEqual(modes.buttons({},{},now=.2),('B','ready_pose'))
+        self.assertEqual(modes.selected,'index_pinch')
+
+    def test_pointing_holds_configured_angle_without_tactile_or_measured_chasing(self):
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.poses=POSES;hand.controls=controls('pointing',trigger=1.)
+        names=FINGER_NAMES['right'][4:8]
+        hand.previous=dict.fromkeys(names,.8)
+        output=targets(POSES,hand.controls)
+        hand.lock_pointing_contact(output,1.)
+        expected=dict(zip(names,POSES['right']['pointing'][4:8]))
+        self.assertEqual({n:output[n] for n in names},expected)
+        hand.previous=dict.fromkeys(names,1.)
+        hand.lock_pointing_contact(output,2.)
+        self.assertEqual({n:output[n] for n in names},expected)
+        hand.controls=controls('index_pinch',trigger=0.)
+        hand.lock_pointing_contact(output,3.)
+        self.assertFalse(hand.contact_goals)
+
+    def test_pointing_entry_does_not_bypass_velocity_bound(self):
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.poses=POSES;hand.controls=controls('pointing',trigger=1.)
+        output=targets(POSES,hand.controls)
+        for side,names in FINGER_NAMES.items():
+            for n in names[4:8]:output[n]=.2
+        hand.lock_pointing_contact(output,1.)
+        self.assertFalse(hand.contact_goals)
+        self.assertEqual(output[FINGER_NAMES['right'][5]],.2)
+
+    def test_pointing_trigger_current_ceiling_increases_but_never_exceeds_stock(self):
+        previous=0.
+        for depth in (0.,.1,.5,1.):
+            values=pointing_currents(controls('pointing',trigger=depth))
+            for row in values.values():
+                self.assertEqual(row[:4],[300.]*4)
+                self.assertEqual(row[8:],[300.]*12)
+                self.assertEqual(row[4:8],[150.+150.*depth]*4)
+                self.assertLessEqual(max(row),300.)
+            self.assertGreaterEqual(values['left'][5],previous);previous=values['left'][5]
+        self.assertEqual(pointing_currents(controls('index_pinch',trigger=1.))['left'],[300.]*20)
+
+    def test_mode2_left_grip_reanchors_only_left_and_right_keeps_following(self):
+        import threading
+        from copy import deepcopy
+        import numpy as np
+        from robotis_vuer.xr_arm_targets import rigid_pose
+        path=ROOT/'robotis_vuer/robotis_vuer/vr_publisher_sh5_hands_hardware.py'
+        cls=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef))
+        method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='_publish_synced_pose_frame_if_ready')
+        class Base:
+            def _publish_synced_pose_frame_if_ready(self):self.motion_count+=1
+        isolated=ast.Module(body=[ast.ClassDef(name='Publisher',bases=[ast.Name(id='Base',ctx=ast.Load())],keywords=[],body=[method],decorator_list=[])],type_ignores=[])
+        scope={'Base':Base,'time':SimpleNamespace(monotonic=lambda:10.),'deepcopy':deepcopy,'rigid_pose':rigid_pose}
+        exec(compile(ast.fix_missing_locations(isolated),str(path),'exec'),scope)
+        n=scope['Publisher']()
+        n._controller_mode,n._hand_mode,n.arm_control_enabled=True,2,True
+        n._phase,n._xr_lock='ACTIVE',threading.RLock()
+        n._last_pub,n._clutch_held,n._clutch_reanchor_pending=None,False,False
+        n._mapper=SimpleNamespace(anchors={side:SimpleNamespace(input_pose=np.eye(4),robot_pose=np.eye(4)) for side in ('left','right')})
+        n._session=SimpleNamespace(mapper=n._mapper)
+        n._goals={'left':np.eye(4)};n._goals['left'][0,3]=.25
+        n.left_controller_matrix=np.eye(4);n.left_controller_matrix[1,3]=.7
+        n._last_input={'left':np.eye(4),'right':np.eye(4)}
+        n.motion_count=0
+        n._hold_for_tracking_gap=Mock(return_value=False);n._graph_check=Mock();n._snapshot=Mock()
+        n._publish_synced_pose_frame_if_ready()
+        self.assertEqual(n.motion_count,1)
+        np.testing.assert_array_equal(n._mapper.anchors['left'].robot_pose,n._goals['left'])
+        np.testing.assert_array_equal(n._mapper.anchors['right'].robot_pose,np.eye(4))
+        self.assertIn('right',n._last_input)
+        # Pressing after repositioning captures only the new left input.
+        n._clutch_held,n._clutch_reanchor_pending=True,True
+        n.left_controller_matrix[1,3]=1.2
+        n._publish_synced_pose_frame_if_ready()
+        np.testing.assert_array_equal(n._mapper.anchors['left'].input_pose,n.left_controller_matrix)
+        anchor=n._mapper.anchors['left'].input_pose.copy()
+        n.left_controller_matrix[1,3]=1.3
+        n._publish_synced_pose_frame_if_ready()
+        np.testing.assert_array_equal(n._mapper.anchors['left'].input_pose,anchor)
+        self.assertEqual(n.motion_count,3)
+        # No reanchor or inherited output with stale input.
+        n._clutch_held=False;n._hold_for_tracking_gap.return_value=True
+        n._publish_synced_pose_frame_if_ready()
+        self.assertEqual(n.motion_count,3)
+
+
+    def test_X_uses_original_grip_paths_with_preflexed_three_finger_start(self):
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.poses,hand.preparing=POSES,{}
+        measured=dict.fromkeys((n for names in FINGER_NAMES.values() for n in names),0.)
+        for depth in (0.,.01,.02,.021,.25,.5,.75,1.):
+            hand.controls=controls('index_pinch',trigger=depth)
+            desired=targets(POSES,hand.controls)
+            before=desired.copy()
+            hand.prepare_targets(desired,measured,1.)
+            self.assertEqual(before,desired)
+            for side,names in FINGER_NAMES.items():
+                original=targets(POSES,controls('grasp',trigger=0.,grip=1.))
+                for i,n in enumerate(names[:12]):
+                    start_fraction=.25 if i<4 else .15
+                    phase=start_fraction+(1-start_fraction)*depth
+                    expected=POSES[side]['open'][i]+phase*(POSES[side]['pinch'][i]-POSES[side]['open'][i])
+                    self.assertAlmostEqual(desired[n],expected)
+                    if depth==1.:self.assertAlmostEqual(desired[n],original[n])
+                self.assertEqual(POSES[side]['index_prepare'][12:],POSES[side]['index_pinch'][12:])
+                for i in (13,14,15,17,18,19):self.assertGreater(desired[names[i]],0.)
+        self.assertFalse(hand.preparing)
+
+    def test_left_clutch_transports_lift_before_rebase(self):
+        # Execute real wrapper with a snapshot that transports BOTH arms.
+        import threading
+        from copy import deepcopy
+        import numpy as np
+        from robotis_vuer.xr_arm_targets import rigid_pose
+        path=ROOT/'robotis_vuer/robotis_vuer/vr_publisher_sh5_hands_hardware.py'
+        cls=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef))
+        method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='_publish_synced_pose_frame_if_ready')
+        class Base:
+            def _publish_synced_pose_frame_if_ready(self):
+                for side in ('left','right'):
+                    np.testing.assert_allclose(self._mapper.anchors[side].robot_pose,self._goals[side])
+        isolated=ast.Module(body=[ast.ClassDef(name='Publisher',bases=[ast.Name(id='Base',ctx=ast.Load())],keywords=[],body=[method],decorator_list=[])],type_ignores=[])
+        scope={'Base':Base,'deepcopy':deepcopy,'rigid_pose':rigid_pose,'time':SimpleNamespace(monotonic=lambda:10.)}
+        exec(compile(ast.fix_missing_locations(isolated),str(path),'exec'),scope)
+        n=scope['Publisher']();n._controller_mode,n._hand_mode,n.arm_control_enabled=True,2,True
+        n._phase,n._xr_lock,n._last_pub='ACTIVE',threading.RLock(),None
+        n._clutch_held,n._clutch_reanchor_pending=False,False
+        n.left_controller_matrix=np.eye(4);n._last_input={}
+        n._mapper=SimpleNamespace(anchors={s:SimpleNamespace(input_pose=np.eye(4),robot_pose=np.eye(4)) for s in ('left','right')})
+        n._session=SimpleNamespace(mapper=n._mapper);n._goals={s:np.eye(4) for s in ('left','right')}
+        n._elbows={s:np.eye(4) for s in ('left','right')}
+        n._hold_for_tracking_gap=Mock(return_value=False);n._graph_check=Mock()
+        def snapshot():
+            for side in ('left','right'):
+                n._mapper.anchors[side].robot_pose[2,3]-=.1
+                n._goals[side][2,3]-=.1
+                n._elbows[side][2,3]-=.1
+        n._snapshot=snapshot
+        n._publish_synced_pose_frame_if_ready()
+        for side in ('left','right'):
+            self.assertAlmostEqual(n._goals[side][2,3],-.1)
+            self.assertAlmostEqual(n._elbows[side][2,3],-.1)
+
+
+    def test_small_trigger_reversal_does_not_bypass_remaining_close_ramp(self):
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.mode,hand.hand_mode,hand.poses='controllers',2,POSES
+        measured={n:0. for names in FINGER_NAMES.values() for n in names}
+        hand.limits={n:dict(lower=-4.,upper=4.,velocity=2.) for n in measured}
+        hand.previous,hand.preparing,hand.last_trigger={},{},{}
+        hand.active,hand.last_output=False,0.
+        hand.node=SimpleNamespace(measured_rx=1.);hand.publish=Mock();hand.rx=1.
+        hand.controls=controls('index_pinch',trigger=1.)
+        hand.tick(measured,1.,True)
+        first=hand.publish.call_args.args[0].copy()
+        hand.controls=controls('index_pinch',trigger=.999)
+        hand.tick(measured,1.01,True)
+        second=hand.publish.call_args.args[0]
+        for side,names in FINGER_NAMES.items():
+            for i in (5,6,9,10):
+                if POSES[side]['index_pinch'][i]>0.01:
+                    self.assertGreater(second[names[i]],first[names[i]])
+                else:
+                    self.assertAlmostEqual(second[names[i]],first[names[i]])
+                self.assertLessEqual(second[names[i]]-first[names[i]],.00500001)
+
+
+    def test_Y_continuous_simultaneous_thumb_and_ulnar_fingers(self):
+        hand=SH5HandOutput.__new__(SH5HandOutput);hand.poses=POSES;hand.preparing={}
+        measured=dict.fromkeys((n for names in FINGER_NAMES.values() for n in names),0.)
+        hand.controls=controls('ulnar_pinch',trigger=.1)
+        desired=targets(POSES,hand.controls);before=desired.copy()
+        self.assertEqual(hand.prepare_targets(desired,measured,1.),before)
+        for side,names in FINGER_NAMES.items():
+            start,end=POSES[side]['ulnar_prepare'],POSES[side]['ulnar_pinch']
+            for i in (2,3,13,14,17,18):
+                self.assertAlmostEqual(desired[names[i]],start[i]+.1*(end[i]-start[i]))
+                self.assertNotEqual(desired[names[i]],end[i])
+        self.assertFalse(hand.preparing)
+
+    def test_default_grip_has_opposed_thumb_C_rest(self):
+        for side,poses in POSES.items():
+            start,end=poses['full_prepare'],poses['full_grip']
+            self.assertEqual(start[:2],end[:2])
+            for i in (5,9,13,17):self.assertGreater(start[i],.5)
+            for i in (2,3):self.assertGreater(abs(start[i]),0.)
+
+
+    def test_real_overhead_loop_holds_left_elbow_during_lift(self):
+        import threading
+        from copy import deepcopy
+        import numpy as np
+        from scipy.spatial.transform import Rotation
+        from robotis_vuer.xr_arm_targets import rigid_pose
+        path=ROOT/'robotis_vuer/robotis_vuer/vr_publisher_sg2_xr_overhead.py'
+        cls=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef))
+        method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='_publish_synced_pose_frame_if_ready')
+        isolated=ast.Module(body=[ast.ClassDef(name='Publisher',bases=[],keywords=[],body=[method],decorator_list=[])],type_ignores=[])
+        scope={'time':SimpleNamespace(monotonic=lambda:10.),'np':np,'Rotation':Rotation,'deepcopy':deepcopy,'rigid_pose':rigid_pose,'SIDES':('left','right'),
+               'limited_pose':lambda old,new,*args:new.copy()}
+        exec(compile(ast.fix_missing_locations(isolated),str(path),'exec'),scope)
+        n=scope['Publisher']();n._path_ready=True;n.arm_control_enabled=True;n._phase='ACTIVE'
+        n._last_pub=None;n._xr_lock=threading.RLock();n._controller_fault_latched=False
+        n._arm_tracking_is_fresh=lambda now:True;n._graph_check=Mock();n._check_shoulder_stationarity=Mock()
+        n._command_rx=dict.fromkeys(('left','right'),10.);n.FEEDBACK_MAX_AGE=5.
+        n.TRACKING_POSITION_LIMIT_M=.25;n.TRACKING_ROTATION_LIMIT_RAD=1.57
+        n.goal_speed,n.angular_speed=.2,1.
+        n._goals={side:np.eye(4) for side in ('left','right')}
+        n._elbows={side:np.eye(4) for side in ('left','right')}
+        n.left_controller_matrix=n.right_controller_matrix=np.eye(4)
+        n._mapper=SimpleNamespace(anchors={side:SimpleNamespace(robot_pose=np.eye(4)) for side in ('left','right')})
+        n._session=SimpleNamespace(inspect=Mock(return_value={}))
+        n._hints={side:SimpleNamespace(path_anchor=np.zeros(3),
+            project_wrist=lambda pos:(pos.copy(),0.),limit_filtered_step=lambda old,new:(new.copy(),1.),
+            elbow=Mock(return_value=np.array([0.,0.,-.1]))) for side in ('left','right')}
+        n._arm_input_enabled=lambda side:side!='left'
+        def snapshot():
+            for side in ('left','right'):
+                n._goals[side][2,3]-=.1;n._elbows[side][2,3]-=.1
+            return {side:{'wrist':n._goals[side].copy()} for side in ('left','right')}
+        n._snapshot=snapshot
+        n._mapper.target=lambda side,pose:n._goals[side].copy()
+        n._publish_pair=Mock();n._set_arm_control_enabled=Mock()
+        n._publish_synced_pose_frame_if_ready()
+        n._set_arm_control_enabled.assert_not_called();n._publish_pair.assert_called_once()
+        self.assertTrue(n._path_frame['left']['clutch_hold'])
+        n._hints['left'].elbow.assert_not_called()
+        for side in ('left','right'):
+            self.assertAlmostEqual(n._goals[side][2,3],-.1)
+            self.assertAlmostEqual(n._elbows[side][2,3],-.1)
+        # A held arm still fails the inherited measured tracking guard.
+        n._last_pub=None
+        n._snapshot=lambda:{side:{'wrist':np.eye(4)} for side in ('left','right')}
+        n._goals['left'][0,3]=1.
+        n._publish_synced_pose_frame_if_ready()
+        n._set_arm_control_enabled.assert_called_once()
+        self.assertIn('tracking error',n._set_arm_control_enabled.call_args.args[1])
+
+
+    def test_body_motion_snapshot_relaxes_elbows_then_reanchors(self):
+        from copy import deepcopy
+        import numpy as np
+        from robotis_vuer.xr_arm_targets import rigid_pose
+        from hardware.controller_stick_motion import BodyMotionPolicy
+        path=ROOT/'robotis_vuer/robotis_vuer/vr_publisher_sh5_hands_hardware.py'
+        cls=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef))
+        method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='_snapshot')
+        links={s:{'elbow':np.eye(4)} for s in ('left','right')}
+        for link in links.values():link['elbow'][2,3]=-.2
+        class Base:
+            def _snapshot(self):return deepcopy(links)
+        clock=[1.]
+        isolated=ast.Module(body=[ast.ClassDef(name='Publisher',bases=[ast.Name(id='Base',ctx=ast.Load())],keywords=[],body=[method],decorator_list=[])],type_ignores=[])
+        scope={'Base':Base,'deepcopy':deepcopy,'rigid_pose':rigid_pose,'time':SimpleNamespace(monotonic=lambda:clock[0]),'SIDES':('left','right'),'Bool':lambda **kw:SimpleNamespace(**kw)}
+        exec(compile(ast.fix_missing_locations(isolated),str(path),'exec'),scope)
+        n=scope['Publisher']();n._controller_mode,n._hand_mode=True,2
+        n._body_elbow_pub=Mock();n._body_motion=False;n._body_policy=BodyMotionPolicy()
+        n._aux_base=[0.,0.,.1];n._aux_joints={};n.lift_joint_current_position=-.2
+        n._mapper=SimpleNamespace(anchors={s:SimpleNamespace(input_pose=np.eye(4),robot_pose=np.eye(4)) for s in ('left','right')})
+        def hints():return {s:SimpleNamespace(previous=np.zeros(3),last_bend=np.ones(3)) for s in ('left','right')}
+        n._hints=hints();n._session=SimpleNamespace(mapper=n._mapper,templates=hints())
+        n._elbows={s:np.eye(4) for s in ('left','right')};n._goals={s:np.eye(4) for s in ('left','right')}
+        n.left_controller_matrix=np.eye(4);n.left_controller_matrix[1,3]=.8
+        n.right_controller_matrix=np.eye(4);n.right_controller_matrix[1,3]=-.8
+        n._last_input={};n.get_logger=lambda:SimpleNamespace(info=Mock())
+        n._snapshot();self.assertTrue(n._body_motion)
+        for side in ('left','right'):self.assertAlmostEqual(n._elbows[side][2,3],-.2)
+        self.assertTrue(n._body_elbow_pub.publish.call_args.args[0].data)
+        n._aux_base=[0.,0.,0.];clock[0]=1.3;n._snapshot()
+        self.assertFalse(n._body_motion)
+        self.assertFalse(n._body_elbow_pub.publish.call_args.args[0].data)
+        np.testing.assert_array_equal(n._mapper.anchors['left'].input_pose,n.left_controller_matrix)
+        np.testing.assert_array_equal(n._mapper.anchors['right'].input_pose,n.right_controller_matrix)
 
 if __name__=='__main__':unittest.main()

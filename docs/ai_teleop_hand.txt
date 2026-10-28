@@ -1,0 +1,165 @@
+# AI Worker SH5 teleop — 배포·빌드·실행 안내 (2026-10-29)
+# 명령 모음입니다. 파일 전체를 bash로 실행하지 말고 필요한 구간만 실행하세요.
+# PC 호스트에서 실행합니다. 각 터미널에서 아래 환경변수를 먼저 설정하세요.
+export PC_IP=192.0.2.10
+export ROBOT_IP=192.0.2.20
+export TELEOP_REPO="$HOME/Downloads/external_repos/ai_worker_teleop_deploy"
+# PC_IP/ROBOT_IP는 문서용 예시입니다. 실제 주소로 바꾸세요.
+
+# ============================================================
+# 1. 다른 PC 최초 설치
+# ============================================================
+# 전제: Linux, Docker Engine + Compose, git, rsync, SSH, Loop 앱(Loop 사용 시).
+# AI Worker에는 기존 ai_worker 컨테이너와 SH5/Cyclo/ROS Jazzy가 설치되어 있어야 합니다.
+mkdir -p ~/Downloads/external_repos
+cd ~/Downloads/external_repos
+git clone --branch main --single-branch \
+  https://github.com/MFIWO/ai_worker_teleop.git ai_worker_teleop_deploy
+cd "$TELEOP_REPO"
+# 새 PC는 이미지와 ROS 패키지를 빌드합니다. 기존 컨테이너 업데이트는 2번 참고.
+bash docker/container.sh build
+bash docker/container.sh start
+bash hardware/install_pc.sh
+# PC 주소로 인증서 생성. 이 PC의 CA를 Quest에서 신뢰 설정하세요.
+docker exec -it robotis-applications bash /root/gen_cert.sh "$PC_IP"
+# Desktop 안내 파일 복사
+mkdir -p ~/Desktop
+cp docs/ai_teleop_hand.txt ~/Desktop/ai_teleop_hand.txt
+
+# ============================================================
+# 2. 기존 PC 코드 업데이트
+# ============================================================
+# 먼저 PC/robot 양쪽 teleop를 Ctrl+C로 종료하고 robot 정리 완료까지 기다립니다.
+# [HAND TORQUE OFF] Verified 40/40 finger motors 확인.
+cd "$TELEOP_REPO"
+git switch main
+git pull --ff-only origin main
+# 로컬 수정 때문에 pull이 거절되면 git status로 확인. 자동 reset 하지 마세요.
+bash hardware/install_pc.sh
+# PC Python 소스는 bind mount 또는 install_pc.sh로 반영됩니다.
+# docker/Dockerfile/requirements가 변경된 경우에만 이미지 build/start를 다시 실행합니다.
+cp docs/ai_teleop_hand.txt ~/Desktop/ai_teleop_hand.txt
+git rev-parse HEAD
+
+# ============================================================
+# 3. PC -> AI Worker 소스 rsync + 컨테이너 설치
+# ============================================================
+# git pull만으로 로봇 컨테이너는 갱신되지 않습니다. 3번과 4번을 함께 실행하세요.
+cd "$TELEOP_REPO"
+ssh "robotis@$ROBOT_IP" 'mkdir -p ~/ai_worker_teleop_sh5'
+rsync -av \
+  --exclude='.git/' --exclude='__pycache__/' --exclude='*.pyc' \
+  --exclude='*.pem' --exclude='*.key' --exclude='docker/workspace/' \
+  --exclude='hardware/evidence/' --exclude='teleop_logs/' \
+  --exclude='build/' --exclude='install/' --exclude='log/' \
+  ./ "robotis@$ROBOT_IP:~/ai_worker_teleop_sh5/"
+ssh "robotis@$ROBOT_IP" \
+  'cd ~/ai_worker_teleop_sh5 && bash hardware/install_robot.sh'
+# 위 단계는 소스·의존성만 복사합니다. 빌드나 모터 실행은 하지 않습니다.
+
+# ============================================================
+# 4. AI Worker 컨테이너에서 C++ 빌드 + manifest 검증
+# ============================================================
+ssh "robotis@$ROBOT_IP" 'docker exec -i ai_worker bash -s' <<'ROBOT_BUILD'
+set -eo pipefail
+source /opt/ros/jazzy/setup.bash
+source /root/ros2_ws/install/setup.bash
+export PYTHONPATH="/workspace/ai_worker_xr/vendor:/workspace/ai_worker_xr:/opt/venv/lib/python3.12/site-packages:${PYTHONPATH:-}"
+cd /workspace/ai_worker_xr
+# 실행 중인 follower가 있으면 중단하고 종료부터 진행합니다.
+if pgrep -f '[r]os2_control_node' >/dev/null; then
+  echo '[STOP] ros2_control_node 실행 중입니다. robot 세션을 먼저 종료하세요.' >&2
+  exit 1
+fi
+# 팔 solver/팔꿈치 제한/충돌 모델 변경은 반드시 C++ 재빌드가 필요합니다.
+if ! python3 -B -m hardware.build_sh5_hands --verify-only; then
+  python3 -B -m hardware.build_sh5_hands --rebuild
+fi
+python3 -B -m hardware.build_sh5_hands --verify-only
+# 손 쓰기 30Hz + 공유 읽기 timeout cap 60ms 드라이버.
+# manifest 누락/이전 버전은 기존 빌드 폴더를 백업한 뒤 새로 빌드합니다.
+if ! python3 -B -m hardware.build_hand_write_rate --verify-only; then
+  build_root=/workspace/ai_worker_xr_hand_write_30hz_bounded_v1
+  if [ -e "$build_root" ]; then
+    mv "$build_root" "${build_root}.backup.$(date +%Y%m%d_%H%M%S_%N)"
+  fi
+  python3 -B -m hardware.build_hand_write_rate
+fi
+python3 -B -m hardware.build_hand_write_rate --verify-only
+ROBOT_BUILD
+# 두 빌드가 Verified여야 실행합니다. 전체 AI Worker colcon 재빌드는 불필요합니다.
+# 새 프로필은 다음 robot 세션이 생성·검증합니다. 예전 프로필을 수동 복사하지 마세요.
+# 소스 hash가 다르다는 오류는 robot 기반 Cyclo/드라이버 버전을 확인해야 합니다.
+
+# ============================================================
+# 5. 맨손 mode 1 + Loop — PC 호스트 터미널 두 개
+# ============================================================
+# 먼저 PC Loop 앱을 엽니다. 각 터미널에서 PC_IP/ROBOT_IP/TELEOP_REPO를 설정하세요.
+# 터미널 1: 로봇 세션. --bringup은 팔만 5초 준비 자세 이동; 손 초기화 궤적 없음.
+bash "$TELEOP_REPO/teleop.sh" robot \
+  --pc-ip "$PC_IP" --robot-ip "$ROBOT_IP" \
+  --loop vr --input hands --hand-mode 1 --bringup
+# 터미널 2: PC 세션
+bash "$TELEOP_REPO/teleop.sh" pc \
+  --pc-ip "$PC_IP" --robot-ip "$ROBOT_IP" \
+  --loop vr --input hands --hand-mode 1
+# Quest: https://PC_IP:8012?ws=wss://PC_IP:8012 (PC_IP를 실제 주소로 치환)
+# Loop 소스: aiworker / HX5-D20
+# Loop 창: V=시작·HOLD·재개, WASD=이동, O/P=회전, 방향키=목, U/I=lift.
+# Shift+A=녹화. C=검토. 이동 키를 놓은 뒤 V로 재앵커·재개.
+
+# ============================================================
+# 6. 컨트롤러 mode 2 + Loop — PC 호스트 터미널 두 개
+# ============================================================
+# 터미널 1
+bash "$TELEOP_REPO/teleop.sh" robot \
+  --pc-ip "$PC_IP" --robot-ip "$ROBOT_IP" \
+  --loop vr --input controllers --hand-mode 2 --bringup
+# 터미널 2
+bash "$TELEOP_REPO/teleop.sh" pc \
+  --pc-ip "$PC_IP" --robot-ip "$ROBOT_IP" \
+  --loop vr --input controllers --hand-mode 2
+# 양쪽 --input/--hand-mode를 동일하게 맞춥니다.
+# Loop 없이 사용: 양쪽 모두 --loop off. 다른 mode는 양쪽 --hand-mode를 함께 변경.
+# A+X: 시작·재개. [XR RESUME READY]까지 컨트롤러를 가만히 유지.
+# B+Y: HOLD. mode 2는 마지막 손 목표를 유지.
+# 왼쪽 grip: 누르는 동안 왼팔 추종, 놓으면 유지. 오른팔은 활성화 후 추종.
+# 오른쪽 grip: ACTIVE에서 현재 기준 재캘리브레이션.
+# B 단독: 팔 준비 자세 복귀 요청. 완료 로그 후 A+X로 수동 재개.
+# A 단독: pointing. Trigger에 따라 검지 유지 전류 한도 증가(기존 300 raw 이내).
+# X 단독: 원래 mode 1 grip pinch 궤적. 엄지 25%, 검지·중지 15% 굽힌 상태에서 시작.
+# Y 단독: 엄지·약지·새끼 함께 닫힘. 엄지 방향 고정, 굽힘 관절만 Trigger 비례 동작.
+# 오른쪽 stick: lift + MOBILE 회전을 대각선으로 동시에 입력 가능.
+# 양쪽 stick 클릭: HEAD/MOBILE 전환. 왼쪽 head/mobile 축 선택 정책 유지.
+# 변경된 Y pose JSON은 robot 설치 + 세션 재시작으로 반영(C++ 재빌드 불필요).
+# 이번 전체 버전 업데이트는 4번 SH5 C++ 빌드도 수행해야 합니다.
+
+# ============================================================
+# 7. 종료 / 로그 / 선택적 상세 trace
+# ============================================================
+# 양쪽 Ctrl+C. robot 터미널은 cleanup 및 40/40 손 토크 OFF 완료까지 열어두세요.
+# 일반 로그: teleop 실행 중 PC의 세 번째 터미널
+ssh -t "robotis@$ROBOT_IP" \
+  'docker exec -it ai_worker bash /workspace/ai_worker_xr/hardware/log_hands.sh --seconds 120'
+# 상세 trace가 필요한 경우에만, 모든 teleop 종료 후 별도 빌드:
+ssh "robotis@$ROBOT_IP" 'docker exec -i ai_worker bash -s' <<'TRACE_BUILD'
+set -eo pipefail
+source /opt/ros/jazzy/setup.bash
+source /root/ros2_ws/install/setup.bash
+cd /workspace/ai_worker_xr
+if pgrep -f '[r]os2_control_node' >/dev/null; then exit 1; fi
+if ! python3 -B -m hardware.build_hand_trace --verify-only; then
+  trace_root=/workspace/ai_worker_xr_hand_trace_bounded_v1
+  if [ -e "$trace_root" ]; then
+    mv "$trace_root" "${trace_root}.backup.$(date +%Y%m%d_%H%M%S_%N)"
+  fi
+  python3 -B -m hardware.build_hand_trace
+fi
+python3 -B -m hardware.build_hand_trace --verify-only
+TRACE_BUILD
+# 이후 robot 실행 명령에만 --hand-trace 추가.
+# 기록: log_hands.sh --driver-trace --seconds 45
+# 자세한 설명: hardware/HAND_TRACE.md / hardware/HX5_LATENCY.md
+# FileNotFoundError: hand_write_manifest.json -> 3번 설치 후 4번 빌드·검증.
+# another writer -> 기존 Vuer/Cyclo 팔 publisher 종료; Cyclo arm:=false 확인.
+# 지연 조사 원본은 과거 기록이며, 2026-10-29 사용자가 현재 환경 지연 해결을 확인했습니다.
