@@ -20,7 +20,9 @@ class TraceDeploymentTests(unittest.TestCase):
             env=trace.follower_environment(Path(d)/'capture',root=Path('/trace'),base_env=original)
         self.assertEqual(env[trace.ENV],d+'/capture')
         self.assertEqual(env['AI_WORKER_HX5_WRITE_HZ'],'30')
+        self.assertEqual(env['AI_WORKER_HX5_READ_TIMEOUT_CAP_MS'],'60.0')  # [ADDED]
         self.assertEqual(original,{'LD_LIBRARY_PATH':'/sdk','UNRELATED':'keep'})
+        self.assertNotIn('AI_WORKER_HX5_READ_TIMEOUT_CAP_MS',original)
         self.assertTrue(env['LD_LIBRARY_PATH'].endswith(':/sdk'))
 
     def test_unverified_overlay_cannot_be_selected(self):
