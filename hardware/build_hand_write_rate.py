@@ -87,7 +87,7 @@ def patch_source(text):
 
 def patch_hardware(text):
     """[ADDED] Bound the shared DXL RX timeout, preserving stock fault/write behavior."""
-    text=replace_once(text,'#include <chrono>','#include <chrono>\\n#include <algorithm>\\n#include <cstdlib>')
+    text=replace_once(text,'#include <chrono>','#include <chrono>\n#include <algorithm>\n#include <cstdlib>')
     return replace_once(text,
         '  double period_ms = period.seconds() * 1000;',
         '''  double period_ms = period.seconds() * 1000;
