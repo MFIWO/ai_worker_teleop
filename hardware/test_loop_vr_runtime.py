@@ -23,17 +23,21 @@ class LoopRuntimeTests(unittest.TestCase):
         from hardware.loop_vr_contract import GROUPS,TOPICS
         from hardware.loop_vr_streamer import main
         frames=[]
-        hand_frames=[]
+        tactile_frames=[]
         schemas=[]
         class Sink:
-            def __init__(self, target):self.target=target
+            def __init__(self, kind):self.kind=kind
             def stats(self):return SimpleNamespace(connected=True)
-            def send_robot(self,stamp,sequence,payload):self.target.append((stamp,sequence,payload))
-            def send_tactile(self,*args):raise AssertionError('fixture has no pressure; do not invent samples')
+            def send_robot(self,stamp,sequence,payload):
+                assert self.kind=='robot'
+                frames.append((stamp,sequence,payload))
+            def send_tactile(self,*args):
+                assert self.kind=='tactile'
+                tactile_frames.append(args)
             def close(self):pass
         def connect(addr,schema,**kwargs):
             schemas.append(schema)
-            return Sink(hand_frames if schema.source_key.endswith('-hand') else frames)
+            return Sink(schema.kind.value)
         epoch=1792660000000000
         def spin(streamer):
             fixture=Node('loop_contract_fixture')
@@ -66,11 +70,15 @@ class LoopRuntimeTests(unittest.TestCase):
              patch('sys.argv',['loop-vr','--loop-addr','unused:50051','--robot-ip','127.0.0.1','--no-camera']):
             main()
         self.assertEqual(len(schemas),2)
-        self.assertEqual([s.kind.value for s in schemas],['robot','robot'])
-        self.assertEqual(schemas[1].robot.name,'HX5-D20')
-        self.assertEqual([(f[0],f[1]) for f in frames],[(f[0],f[1]) for f in hand_frames])
-        self.assertTrue(all(not any('.left_hand.' in k or '.right_hand.' in k for k in f[2]) for f in frames))
-        self.assertTrue(all(not any('.left_arm.' in k or '.mobile.' in k for k in f[2]) for f in hand_frames))
+        # CHANGED(2026-10-28): one Robot State, typed Tactile; no fake pressure.
+        self.assertEqual([s.kind.value for s in schemas],['robot','tactile'])
+        self.assertEqual(schemas[0].robot.name,'aiworker')
+        self.assertEqual(schemas[1].tactile.name,'HX5-D20')
+        self.assertEqual(tactile_frames,[])
+        declared={c.key for c in schemas[0].robot.channels}
+        self.assertIn('ffw_sh5_vr.observation.left_hand.joint_position',declared)
+        self.assertIn('ffw_sh5_vr.observation.left_arm.joint_position',declared)
+        self.assertFalse(any('tactile' in k for k in declared))
         self.assertGreater(len(frames),50)
         prefix='ffw_sh5_vr.'
         active=[f for f in frames if f[2][prefix+'teleop.flags'][0]]
@@ -78,10 +86,11 @@ class LoopRuntimeTests(unittest.TestCase):
         self.assertTrue(active)
         self.assertGreater(len(held),10)
         self.assertTrue(any(f[2][prefix+'teleop.flags'][2] for f in held))
-        self.assertTrue(any(f[2][prefix+'teleop.action_fresh'][0]==0 for f in held))
+        self.assertNotIn(prefix+'teleop.action_fresh',frames[0][2])
         self.assertTrue(all(f[2][prefix+'teleop.action_valid'][0]==0 for f in held))
         for stamp,_,payload in held:
             self.assertEqual(payload[prefix+'observation.left_arm.joint_position'],[.1]*7)
+            self.assertEqual(payload[prefix+'observation.left_hand.joint_position'],[.1]*20)
             if payload[prefix+'action.left_arm.joint_position'] is not None:
                 self.assertEqual(payload[prefix+'action.left_arm.joint_position'],[.2]*7)
             self.assertLess(abs(stamp-epoch),10000000)
