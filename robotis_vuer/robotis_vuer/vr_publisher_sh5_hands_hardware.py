@@ -161,7 +161,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             super().publish_right_joystick(thumbstick_value)
 
     def publish_left_joystick_from_thumbstick(self, thumbstick_value):
-        """[CHANGED 2026-10-28] Head jog is time-based and stops at live URDF limits."""
+        """Jog head in time-based increments within live URDF limits. [CHANGED 2026-10-28]"""
         limits = (self._hardware_manifest or {}).get('auxiliary_limits', {})
         if not all(k in limits for k in ('head_joint1', 'head_joint2')):
             return
@@ -183,7 +183,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self.last_head_publish_sec = now
 
     def publish_cmd_vel_from_thumbstick(self, left_thumbstick_value, right_thumbstick_value):
-        """[CHANGED 2026-10-28] SH5 only: center-correct, axis-lock and ramp /cmd_vel."""
+        """Shape SH5 mobile stick commands and avoid diagonal and rebound. [CHANGED 2026-10-28]"""
         if self.joystick_mode:
             self._mobile_filter.disarm('returned to HEAD')
             self._aux_base = [0., 0., 0.]
