@@ -315,6 +315,11 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 return
             if self._clutch_reanchor_pending:
                 try:
+                    # [CHANGED] Recovery from XR tracking gaps must use the
+                    # same inherited hardware gate and graph checks as motion.
+                    if self._hold_for_tracking_gap():
+                        return
+                    self._graph_check()
                     if (self._tracking_input_state(now) != 'fresh'
                             or self._feedback_input_state(now) != 'fresh'):
                         return
