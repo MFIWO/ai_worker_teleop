@@ -8,7 +8,7 @@ import math
 
 
 def _axis(value, deadzone):
-    if not math.isfinite(value) or abs(value) > 1.05:
+    if not math.isfinite(value) or abs(value) > 1.5:
         raise ValueError('invalid controller axis')
     magnitude = abs(value)
     if magnitude <= deadzone:
@@ -34,6 +34,8 @@ def head_targets(stick, previous, measured, limits, elapsed, speed=0.30):
         bound = limits[name]
         lower, upper, velocity = (float(bound[k]) for k in ('lower', 'upper', 'velocity'))
         base = float(measured[index] if previous is None else previous[index])
+        if not math.isfinite(float(stick[index])) or abs(float(stick[index])) > 1.05:
+            raise ValueError(f'{name}: invalid joystick input')
         demand = _axis(float(stick[index]), 0.10)
         if (not all(map(math.isfinite, (lower, upper, velocity, base)))
                 or lower >= upper or velocity <= 0):
@@ -123,7 +125,8 @@ class MobileStickFilter:
         # Lock one axis until both axes actually return to neutral.
         if x == 0.0 and y == 0.0:
             self._axis_lock = None
-        elif self._axis_lock is None:
+        elif self._axis_lock is None and max(abs(self.output[0]), abs(self.output[1])) < 1e-5:
+            # Do not start the other axis until the previous translation has stopped.
             self._axis_lock = 0 if abs(x) >= abs(y) else 1
         dx = -x * self.SPEED[0] if self._axis_lock == 0 else 0.0
         dy = y * self.SPEED[1] if self._axis_lock == 1 else 0.0
