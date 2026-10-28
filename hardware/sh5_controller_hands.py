@@ -103,6 +103,9 @@ class SH5HandOutput:
         node.get_logger().info('[SH5 HAND OUTPUT] '+(
             'Optical input callbacks only; no hand output timer or interpolation. Global HOLD/fault remains.'
             if self.mode=='hands' else
+            'Controller mode 2: trigger closure <= 50% of configured finger velocity; '
+            'opening and grip-pinch direct, global HOLD/fault retained.'
+            if self.mode=='controllers' and self.hand_mode==2 else
             'Direct position relay; no added smoothing, slew or hand-age gate. Global HOLD/fault remains.'
             if self.direct_output else 'Mode 1: original hand velocity limits and input watchdog.'))
 
