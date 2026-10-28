@@ -1,7 +1,10 @@
-"""Build/select the same Dynamixel driver with HX5 packet writes at 30 Hz.
+"""Build/select the existing Dynamixel driver with 30 Hz HX5 writes and a bounded RX wait.
 
-No ROS node or serial port is opened by this builder. Original installed sources
-are preserved. Only model 260/261 writes are paced in the existing write loop.
+[CHANGED 2026-10-28] The original serial port, read IDs, packet grouping,
+write ownership, failure status and arm write policy remain unchanged. The
+controller loop's measured overrun must not become the *next* BulkRead timeout.
+A missing arm ID still invalidates the shared read and can stop all writes;
+this patch shortens transient waits, NOT independent hand communication.
 """
 import argparse
 import hashlib
@@ -12,13 +15,16 @@ import shutil
 import subprocess
 
 SOURCE=Path('/root/ros2_ws/src/dynamixel_hardware_interface')
-ROOT=Path('/workspace/ai_worker_xr_hand_write_30hz')
+ROOT=Path('/workspace/ai_worker_xr_hand_write_30hz_bounded_v1')  # [CHANGED] Keep prior verified build for rollback.
 CPP=Path('src/dynamixel/dynamixel.cpp')
+HARDWARE=Path('src/dynamixel_hardware_interface.cpp')  # [ADDED] Same ros2_control read callback.
 HEADER=Path('include/dynamixel_hardware_interface/dynamixel/dynamixel.hpp')
 HELPER=Path('include/dynamixel_hardware_interface/dynamixel/hx5_write_cadence.hpp')
 TEMPLATE=Path(__file__).with_name('hx5_write_cadence.hpp')
 PACKAGE='dynamixel_hardware_interface'
 ENV_HZ='AI_WORKER_HX5_WRITE_HZ'
+ENV_READ_CAP='AI_WORKER_HX5_READ_TIMEOUT_CAP_MS'  # [ADDED] Only in verified follower process.
+READ_CAP_MS=60.0  # [ADDED] Conservative cap; not a hand-ID independence guarantee.
 SOURCE_HASHES={str(CPP):'15f36f4df5d93a2246d8fcc3e1b98c2c1d5caa2114441da32b27913ac8023adb',
                str(HEADER):'1d7c7e44e538742ba2603094be2a86b77bf97152be139102e8123422f975752a'}
 
@@ -79,6 +85,28 @@ def patch_source(text):
     return text
 
 
+def patch_hardware(text):
+    """[ADDED] Bound the shared DXL RX timeout, preserving stock fault/write behavior."""
+    text=replace_once(text,'#include <chrono>','#include <chrono>\\n#include <algorithm>\\n#include <cstdlib>')
+    return replace_once(text,
+        '  double period_ms = period.seconds() * 1000;',
+        '''  double period_ms = period.seconds() * 1000;
+  // [CHANGED 2026-10-28] Never turn a delayed previous loop period into
+  // an equally long next SDK BulkRead wait. Keep one serial port and all IDs.
+  // Read failures still propagate to CheckError(), never fake fresh states.
+  if (const char * cap_text = std::getenv("AI_WORKER_HX5_READ_TIMEOUT_CAP_MS")) {
+    char * end = nullptr;
+    const double cap_ms = std::strtod(cap_text, &end);
+    if (end == cap_text || *end != '\\0' || !std::isfinite(cap_ms) ||
+        cap_ms < 20.0 || cap_ms > 100.0) {
+      RCLCPP_ERROR_STREAM(logger_, "Invalid HX5 read timeout cap: " << cap_text);
+      return hardware_interface::return_type::ERROR;
+    }
+    period_ms = std::min(period_ms, cap_ms);
+  }''')
+
+
+
 def source_hashes(source):
     return {str(p.relative_to(source)):sha(p) for p in sorted(source.rglob('*'))
             if p.is_file() and '.git' not in p.parts and '__pycache__' not in p.parts}
@@ -90,14 +118,16 @@ def library(root):return root/'install'/PACKAGE/'lib'/('lib'+PACKAGE+'.so')
 def verify(root=ROOT,source=SOURCE):
     root=Path(root);source=Path(source)
     m=json.loads((root/'hand_write_manifest.json').read_text())
-    if m.get('purpose')!='hx5_packet_write_cadence' or m.get('hand_write_hz')!=30.0:
+    if (m.get('purpose')!='hx5_packet_write_bounded_read_v1' or m.get('hand_write_hz')!=30.0
+            or m.get('read_timeout_cap_ms')!=READ_CAP_MS):
         raise ValueError('Unknown HX5 cadence build')
     if source_hashes(source)!=m['original_source_sha256']:
         raise ValueError('Original driver changed; rebuild the hand cadence overlay')
     dest=root/'src'/PACKAGE
     expected={str(CPP):hashlib.sha256(patch_source((source/CPP).read_text()).encode()).hexdigest(),
               str(HEADER):hashlib.sha256(patch_header((source/HEADER).read_text()).encode()).hexdigest(),
-              str(HELPER):sha(TEMPLATE)}
+              str(HELPER):sha(TEMPLATE),
+              str(HARDWARE):hashlib.sha256(patch_hardware((source/HARDWARE).read_text()).encode()).hexdigest()}
     if m['patched_sha256']!=expected or any(sha(dest/p)!=v for p,v in expected.items()):
         raise ValueError('Hand cadence patch changed; rebuild before operation')
     if sha(library(root))!=m['library_sha256']:raise ValueError('Hand cadence library changed')
@@ -111,6 +141,7 @@ def follower_environment(root=ROOT,base=None):
     for name,path in [('AMENT_PREFIX_PATH',prefix),('CMAKE_PREFIX_PATH',prefix),('LD_LIBRARY_PATH',prefix+'/lib')]:
         env[name]=path+(':'+env[name] if env.get(name) else '')
     env[ENV_HZ]='30'
+    env[ENV_READ_CAP]=str(READ_CAP_MS)  # [ADDED] Bounded read only in follower child.
     return env
 
 
@@ -125,7 +156,9 @@ def verify_running_follower(root=ROOT):
             env=(proc/'environ').read_bytes().split(b'\0')
             maps=(proc/'maps').read_text()
         except (OSError,UnicodeDecodeError):continue
-        followers.append(ENV_HZ.encode()+b'=30' in env and str(library(Path(root))) in maps)
+        followers.append(ENV_HZ.encode()+b'=30' in env and
+                         (ENV_READ_CAP+'='+str(READ_CAP_MS)).encode() in env and
+                         str(library(Path(root))) in maps)
     if followers!=[True]:raise RuntimeError('Restart the robot session to select the HX5 30 Hz hardware driver')
 
 
@@ -142,18 +175,20 @@ def build(source=SOURCE,root=ROOT):
     shutil.copytree(source,dest,ignore=shutil.ignore_patterns('.git','__pycache__'))
     (dest/CPP).write_text(patch_source((source/CPP).read_text()))
     (dest/HEADER).write_text(patch_header((source/HEADER).read_text()))
+    (dest/HARDWARE).write_text(patch_hardware((source/HARDWARE).read_text()))  # [ADDED]
     shutil.copyfile(TEMPLATE,dest/HELPER)
     subprocess.run(['colcon','build','--packages-select',PACKAGE,'--executor','sequential',
                     '--cmake-args','-DCMAKE_BUILD_TYPE=Release','-DBUILD_TESTING=OFF'],
                    cwd=root,env={**os.environ,'CMAKE_BUILD_PARALLEL_LEVEL':'2'},check=True,timeout=900)
     if source_hashes(source)!=original:raise RuntimeError('Original driver changed during build')
-    m={'purpose':'hx5_packet_write_cadence','hand_write_hz':30.0,'read_loop_changed':False,
+    m={'purpose':'hx5_packet_write_bounded_read_v1','hand_write_hz':30.0,
+       'read_timeout_cap_ms':READ_CAP_MS,'read_loop_changed':True,
        'arm_writes_changed':False,'robot_commands_sent':False,'original_source_sha256':original,
-       'patched_sha256':{str(p):sha(dest/p) for p in (CPP,HEADER,HELPER)},
+       'patched_sha256':{str(p):sha(dest/p) for p in (CPP,HEADER,HELPER,HARDWARE)},
        'library_sha256':sha(library(root))}
     (root/'hand_write_manifest.json').write_text(json.dumps(m,indent=2)+'\n')
     verify(root,source)
-    print('[HX5 WRITE BUILD] Original driver path, hand packets=30 Hz; no robot started')
+    print(f'[HX5 WRITE BUILD] Original serial/ID path, hand packets=30 Hz, DXL read timeout <= {READ_CAP_MS:g}ms; no robot started')
 
 
 def main():
