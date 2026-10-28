@@ -207,6 +207,39 @@ stick travel; MOBILE mode controls base yaw with horizontal travel and ignores
 lift input. Both stick clicks toggle modes. Existing axis signs, deadzones,
 left-stick head/base controls and activation checks remain in effect.
 
+#### SH5 controller head/mobile refinement (2026-10-28)
+
+[CHANGED] This applies to `--input controllers` with either hand mode 1 or 2;
+it does not change optical hands, SG2 mode, arm QP or hardware follower safety.
+The **physical, live SH5 URDF** limits remain authoritative: head_joint1
+(tilt) = [-0.2317, +0.6951] rad, head_joint2 (pan) = [-0.35, +0.35] rad,
+lift = [-0.5, 0] m. Head jog now uses 0.30 rad/s independent of WebXR event
+rate (rather than 0.06 rad per input event) and clamps at the *live* URDF
+limits without creating an out-of-range command. Lift jog scale is reduced
+from 0.005 to 0.002 m per 30 Hz update (approximately 0.06 m/s).
+
+[CHANGED] In MOBILE, pressing either stick immediately commands zero and
+disarms translation. Release both sticks and keep them at their physical
+centers for at least 0.30 seconds before motion is accepted. The offset
+is learned per axis, with at most 0.22 normalized stick displacement;
+a larger resting offset blocks motion and must be resolved at the device
+or XR input calibration, not by increasing deadzone without limit. When
+motion is already at zero, very small center drift is tracked slowly.
+The `[STICK INTENT]` log prints `mobile_zero`, `mobile_ready` and
+`filter`. Left stick selects **forward/back OR left/right**, never both.
+Yaw from the right stick is also suppressed while translation is active.
+Slew limits stop/restart movement gently, and brief reversed input after
+a release is rejected for 0.16 seconds. Loss of a fresh controller frame
+or ACTIVE gating disarms MOBILE and commands zero.
+
+A base moving *physically* backward while `/cmd_vel.linear.x` stays
+zero is **not** joystick drift: inspect `/odom`, swerve drive/controller
+logs, drive motor velocity and their timestamps instead. Run the first
+physical trial in a clear area with lift stationary; compare raw Vuer
+`thumbstickValue`, `[STICK INTENT]`, `/cmd_vel`, and odometry. Neither
+URDF joint limits nor collision checks should be bypassed to cure a
+latching hardware fault; read `/xr_hardware/gate_status` for its reason.
+
 HX5-D20 poses in `hx5_controller_poses.json` use 20 joints per side. The G1
 7-joint preset-selection structure and mirrored-hand convention in the local
 GR00T checkout (`b042411`, `decoupled_wbc/control/teleop/solver/hand/g1_gripper_ik_solver.py`)
