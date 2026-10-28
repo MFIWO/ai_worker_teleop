@@ -7,7 +7,7 @@ from hardware.ready_recovery import decode_request, gate_disarmed, recovery_even
 
 class RecoveryContractTests(unittest.TestCase):
     def test_only_serialized_well_formed_requests_accepted(self):
-        self.assertEqual(decode_request('{"request_id":"123_abc","action":"ready_pose"}'.replace('_','')),
+        self.assertEqual(decode_request('{"request_id":"123abc","action":"ready_pose"}'),
                          '123abc')
         for text in ('{}','{"request_id":"","action":"ready_pose"}',
                      '{"request_id":"1","action":"start"}',
