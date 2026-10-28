@@ -207,6 +207,58 @@ stick travel; MOBILE mode controls base yaw with horizontal travel and ignores
 lift input. Both stick clicks toggle modes. Existing axis signs, deadzones,
 left-stick head/base controls and activation checks remain in effect.
 
+#### SH5 controller head/mobile refinement (2026-10-28)
+
+[CHANGED] This applies to `--input controllers` with either hand mode 1 or 2;
+it does not change optical hands, SG2 mode, arm QP or hardware follower safety.
+The **physical, live SH5 URDF** limits remain authoritative: head_joint1
+(tilt) = [-0.2317, +0.6951] rad, head_joint2 (pan) = [-0.35, +0.35] rad,
+lift = [-0.5, 0] m. Head jog now uses 0.30 rad/s independent of WebXR event
+rate (rather than 0.06 rad per input event) and clamps at the *live* URDF
+limits without creating an out-of-range command. Lift jog scale is reduced
+from 0.005 to 0.002 m per 30 Hz update (approximately 0.06 m/s).
+
+[CHANGED] In MOBILE, pressing either stick immediately commands zero and
+disarms translation. Release both sticks and keep them at their physical
+centers for at least 0.30 seconds before motion is accepted. The offset
+is learned per axis, with at most 0.22 normalized stick displacement;
+a larger resting offset blocks motion and must be resolved at the device
+or XR input calibration, not by increasing deadzone without limit. When
+motion is already at zero, very small center drift is tracked slowly.
+The `[STICK INTENT]` log prints `mobile_zero`, `mobile_ready` and
+`filter`. Left stick selects **forward/back OR left/right**, never both.
+Yaw from the right stick is also suppressed while translation is active.
+[CHANGED 2026-10-28] The MOBILE setpoint is now jerk- and
+acceleration-clamped: discrete acceleration is `(v_k - v_(k-1))/dt`,
+and its step is limited by the declared per-axis `JERK` limit.
+During braking, each component approaches zero monotonically and is
+clamped at zero rather than crossing to the opposite sign. Reversing
+direction intentionally requires the stick to pass through neutral
+**after the previous commanded velocity reaches zero**, then a new
+opposite press. This is deliberately stricter than the old 0.16-second
+reversal timer, which could allow a long stick rebound to reverse.
+Yaw and translation also cannot overlap during a mode-direction change.
+A forced stop or invalid tracking sample can bypass a smooth jerk ramp
+to publish zero immediately. Loss of a fresh controller frame or ACTIVE
+gating disarms MOBILE and commands zero.
+
+A base moving *physically* backward while `/cmd_vel.linear.x` stays
+zero is **not** joystick drift: inspect `/odom`, swerve drive/controller
+logs, drive motor velocity and their timestamps instead. The upstream
+ROBOTIS `SwerveDriveController` declares 0.1m/s linear and 0.1rad/s
+angular velocity deadbands by default. The official
+`ffw_sh5_follower_ai_hardware_controller.yaml` sets
+`enabled_speed_limits: false`, so its listed acceleration/jerk limits
+are inactive. Together these can make the downstream wheel command
+abrupt near zero even when this PC stick ramp is continuous; check
+the *live* controller parameters and actual wheel feedback before
+retuning firmware/controller limits. This PR deliberately does not change
+wheel/steering hardware parameters. Run the first physical trial in a
+clear area with lift stationary; compare raw Vuer `thumbstickValue`,
+`[STICK INTENT]`, `/cmd_vel`, and odometry. Neither URDF joint limits nor
+collision checks should be bypassed to cure a latching hardware fault;
+read `/xr_hardware/gate_status` for its reason.
+
 HX5-D20 poses in `hx5_controller_poses.json` use 20 joints per side. The G1
 7-joint preset-selection structure and mirrored-hand convention in the local
 GR00T checkout (`b042411`, `decoupled_wbc/control/teleop/solver/hand/g1_gripper_ik_solver.py`)
