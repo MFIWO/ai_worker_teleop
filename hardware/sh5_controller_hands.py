@@ -10,6 +10,9 @@ HAND_TOPICS = {side: f'/leader/joint_trajectory_command_broadcaster_{side}_hand/
                for side in FINGER_NAMES}
 NATIVE_TOPICS = {side:f'/xr_hardware/sh5/native_{side}_hand' for side in FINGER_NAMES}
 HAND_SPEED_SCALE = .85
+# [CHANGED 2026-10-28] Controller mode 2 trigger CLOSING only: half the configured
+# finger velocity. Optical modes, grip-pinch and opening are unaffected.
+MODE2_TRIGGER_CLOSE_SPEED_SCALE = .5
 # ROBOTIS DexPilotOptimizer.set_joint_limit expands bounds by 1e-3 rad.
 # Accept that solver margin at input, then clamp to the physical URDF bounds.
 # This never expands the limits of a command sent to the hand.
@@ -94,6 +97,7 @@ class SH5HandOutput:
         self.controls = None
         self.rx = -math.inf
         self.previous = {}
+        self.last_trigger = {}  # [ADDED] Per-hand direction; trigger release is never slowed.
         self.active = False
         self.last_output = 0.
         node.get_logger().info('[SH5 HAND OUTPUT] '+(
@@ -155,6 +159,7 @@ class SH5HandOutput:
             self.publish(measured)
         self.active = False
         self.previous.clear()
+        self.last_trigger.clear()  # [ADDED] Do not carry pre-HOLD trigger states to restart.
         self.preparing.clear()
 
     def update_authority(self,measured,now,allowed):
@@ -206,5 +211,30 @@ class SH5HandOutput:
         output = (desired if self.direct_output else
                   slew_aux(desired,self.previous,measured,self.limits,
                            now-self.last_output if self.active else .01))
+        if self.mode=='controllers' and self.hand_mode==2:
+            # [CHANGED 2026-10-28] Mode 2 previously jumped directly to the
+            # target on every trigger sample. Bound the joint GOAL advance to
+            # 50% of the configured finger velocity while closing, without
+            # changing the final grasp angle, pinch override, or release speed.
+            dt = now-self.last_output if self.active else .01
+            for side,item in self.controls.items():
+                trigger = item['trigger']
+                closing = (item['grip']<=.05 and trigger>.02 and
+                           trigger>=self.last_trigger.get(side,0.)-1e-6)
+                if closing:
+                    names = FINGER_NAMES[side]
+                    # Thumb-out preparation must be allowed to reach its
+                    # measured position before the existing 3s preparation gate.
+                    prep = self.preparing.get(side)
+                    if prep is not None and not prep['done']:
+                        names = names[4:]
+                    if names:
+                        half_speed = {name:dict(self.limits[name],
+                            velocity=self.limits[name]['velocity']*
+                                     MODE2_TRIGGER_CLOSE_SPEED_SCALE) for name in names}
+                        limited = slew_aux({name:desired[name] for name in names},
+                                           self.previous,measured,half_speed,dt)
+                        output.update(limited)
+                self.last_trigger[side] = trigger if item['grip']<=.05 else 0.
         self.publish(output)
         self.previous,self.last_output,self.active = output,now,True
