@@ -17,7 +17,10 @@ def running_trace():
             env=(p/'environ').read_bytes().split(b'\0')
             dirs=[s.split(b'=',1)[1].decode() for s in env if s.startswith(b'AI_WORKER_HX5_TRACE_DIR=')]
             maps=(p/'maps').read_text()
-            if len(dirs)==1 and '/ai_worker_xr_hand_trace/' in maps:found.append((int(p.name),Path(dirs[0])))
+            # [CHANGED 2026-10-28] Resolve the versioned overlay, not a stale hard-coded path.
+            from hardware import build_hand_trace as trace, build_hand_write_rate as base
+            if len(dirs)==1 and str(base.library(trace.ROOT)) in maps:
+                found.append((int(p.name),Path(dirs[0])))
         except (OSError,UnicodeError):continue
     if len(found)!=1:raise RuntimeError('Start robot session with --hand-trace --bringup first; no unique trace follower found')
     return found[0]
