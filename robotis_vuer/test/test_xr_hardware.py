@@ -380,6 +380,35 @@ class HardwarePublisherTests(unittest.TestCase):
         np.testing.assert_array_equal(n._session.mapper.anchors['left'].input_pose, old_input)
 
 
+    def test_SH5_measured_lift_transports_stationary_wrist_in_both_input_modes(self):
+        # [ADDED] Optical hands and mode-2 controllers share this exact
+        # HardwareXRPublisher snapshot method: no VR hand displacement required.
+        _, _, links = self.capture()
+        n = self.node
+        n.hardware_model = 'sh5'
+        n._snapshot = HardwareXRPublisher._snapshot.__get__(n)
+        original_goal = n._goals['left'][:3,3].copy()
+        original_anchor = n._session.mapper.anchors['left'].robot_pose[:3,3].copy()
+        original_input = n._session.mapper.anchors['left'].input_pose.copy()
+        original_shoulder = n._session.templates['left'].shoulder.copy()
+        unchanged_tf = deepcopy(links)  # SH5 lift joint feedback drives compensation.
+        with patch.object(XRDeltaPublisher, '_snapshot', return_value=unchanged_tf):
+            n.lift_joint_current_position = .06
+            n._snapshot()
+            n._snapshot()  # [DEBUG] A repeated snapshot must never double-add.
+            np.testing.assert_allclose(n._goals['left'][:3,3],
+                                       original_goal + [0.,0.,.06])
+            np.testing.assert_allclose(n._session.mapper.anchors['left'].robot_pose[:3,3],
+                                       original_anchor + [0.,0.,.06])
+            np.testing.assert_allclose(n._session.templates['left'].shoulder,
+                                       original_shoulder + [0.,0.,.06])
+            np.testing.assert_array_equal(n._session.mapper.anchors['left'].input_pose,
+                                          original_input)
+            n.lift_joint_current_position = -.04
+            n._snapshot()
+            np.testing.assert_allclose(n._goals['left'][:3,3],
+                                       original_goal + [0.,0.,-.04])
+
     def test_no_reference_change_on_repeated_active_XA(self):
         self.capture()
         before=signature(self.node._session)
