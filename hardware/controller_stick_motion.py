@@ -59,10 +59,13 @@ class MobileStickFilter:
     STABLE_ERROR = 0.025
     STABLE_SECONDS = 0.30
     DEADZONE = 0.085
-    REVERSE_PAUSE = 0.16
     SPEED = (0.2, 0.2, 1.0 / 3.0)
     ACCEL = (0.65, 0.65, 1.0)
     DECEL = (1.10, 1.10, 1.7)
+    # [CHANGED 2026-10-28] Clamp d(v)/dt and d²(v)/dt² (accel/jerk).
+    JERK = (12.0, 12.0, 18.0)
+    # A reverse direction requires an observed neutral, not just a timer.
+    STOP_EPS = 1e-5
 
     def __init__(self):
         self.center = None
@@ -78,7 +81,7 @@ class MobileStickFilter:
         self._last_time = None
         self._axis_lock = None
         self._direction = [0, 0, 0]
-        self._reverse_since = [None, None, None]
+        self._acceleration = [0.0, 0.0, 0.0]
         self.output = (0.0, 0.0, 0.0)
 
     def update(self, left, right, *, pressed=False, now):
@@ -118,6 +121,11 @@ class MobileStickFilter:
                 self.reason = 'neutral calibrated; mobile ready'
             return self.output
 
+        # [CHANGED] A gap is not a large integration step that should create
+        # an unobserved motion. The 300ms cutoff matches the PC intent TTL.
+        if now - self._last_time > 0.30:
+            self.disarm('stale controller samples')
+            return self.output
         dt = min(0.05, max(0.0, now - self._last_time))
         self._last_time = now
         corrected = tuple(v-c for v, c in zip(raw, self.center))
@@ -127,42 +135,65 @@ class MobileStickFilter:
         # Lock one axis until both axes actually return to neutral.
         if x == 0.0 and y == 0.0:
             self._axis_lock = None
-        elif self._axis_lock is None and max(abs(self.output[0]), abs(self.output[1])) < 1e-5:
-            # Do not start the other axis until the previous translation has stopped.
+        elif (self._axis_lock is None and
+              max(abs(value) for value in self.output) < self.STOP_EPS):
+            # [CHANGED] A new translation must wait for old XY *and yaw* to stop.
             self._axis_lock = 0 if abs(x) >= abs(y) else 1
         dx = -x * self.SPEED[0] if self._axis_lock == 0 else 0.0
         dy = y * self.SPEED[1] if self._axis_lock == 1 else 0.0
-        dw = (-yaw * self.SPEED[2] if self._axis_lock is None
-              and max(abs(self.output[0]), abs(self.output[1])) < 1e-5 else 0.0)
+        dw = (-yaw * self.SPEED[2] if x == 0.0 and y == 0.0
+              and self._axis_lock is None
+              and max(abs(self.output[0]), abs(self.output[1])) < self.STOP_EPS
+              else 0.0)
         desired = [dx, dy, dw]
 
         next_output = []
         for index, target in enumerate(desired):
             prior = self.output[index]
             sign = (1 if target > 0 else -1) if abs(target) > 1e-12 else 0
-            # [CHANGED] Release bounce cannot briefly command reverse.
+
             if sign == 0:
-                self._reverse_since[index] = None
-                if abs(prior) < 1e-5:
+                # Neutral releases the direction latch *after* braking to zero.
+                if abs(prior) < self.STOP_EPS:
                     self._direction[index] = 0
             elif self._direction[index] == 0:
                 self._direction[index] = sign
             elif sign != self._direction[index]:
-                if self._reverse_since[index] is None:
-                    self._reverse_since[index] = now
-                if now - self._reverse_since[index] < self.REVERSE_PAUSE:
-                    target = 0.0
-                else:
-                    self._direction[index] = sign
-                    self._reverse_since[index] = None
+                # [CHANGED 2026-10-28] Do not authorize a sign reversal just
+                # because a negative joystick rebound lasted 160ms. Brake to
+                # zero and require an actual neutral sample before reversing.
+                target = 0.0
+
+            if dt <= 0.0:
+                next_output.append(prior)
+                continue
+
+            # [CHANGED] Finite-difference derivative clamp: velocity command
+            # rate (acceleration) and its rate of change (jerk), both in SI.
+            rate = (self.ACCEL[index] if abs(target) > abs(prior)
+                    and target * prior >= 0.0 else self.DECEL[index])
+            requested_accel = max(-rate, min(rate, (target - prior) / dt))
+            last_accel = self._acceleration[index]
+            max_accel_change = self.JERK[index] * dt
+            accel = max(last_accel - max_accel_change,
+                        min(last_accel + max_accel_change, requested_accel))
+            velocity = prior + accel * dt
+
+            # [CHANGED] Do not let a transient positive acceleration continue
+            # after release, or a braking trajectory cross the zero boundary.
+            # A hard brake-to-zero may override the jerk bound for safety.
+            if target >= prior:
+                velocity = max(prior, min(target, velocity))
             else:
-                self._reverse_since[index] = None
-            rate = self.DECEL[index] if abs(target) < abs(prior) or target*prior < 0 else self.ACCEL[index]
-            delta = max(-rate*dt, min(rate*dt, target-prior))
-            value = prior + delta
-            if abs(value) < 1e-5 and abs(target) < 1e-5:
-                value = 0.0
-            next_output.append(max(-self.SPEED[index], min(self.SPEED[index], value)))
+                velocity = min(prior, max(target, velocity))
+            if target == 0.0 and prior != 0.0 and velocity * prior < 0.0:
+                velocity = 0.0
+            if abs(velocity) < self.STOP_EPS and abs(target) < self.STOP_EPS:
+                velocity = 0.0
+
+            velocity = max(-self.SPEED[index], min(self.SPEED[index], velocity))
+            self._acceleration[index] = (velocity - prior) / dt
+            next_output.append(velocity)
         self.output = tuple(next_output)
 
         # Slow bounded center tracking only after a long, *already neutral*
