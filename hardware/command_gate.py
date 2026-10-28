@@ -61,6 +61,10 @@ class HardwareCommandGate(Node):
             from hardware.sh5_controller_hands import HAND_SPEED_SCALE
             direct = self.profile['hand_input']=='hands' or self.profile['hand_mode']==2
             self.profile['hand_speed_scale'] = None if direct else HAND_SPEED_SCALE
+            # [ADDED 2026-10-28] Diagnostic only: controller mode 2 trigger closing.
+            self.profile['hand_trigger_close_scale'] = (
+                HAND_SPEED_SCALE*0.5 if self.profile['hand_input']=='controllers'
+                and self.profile['hand_mode']==2 else None)
             self.profile['hand_output_policy'] = ('xr_ai_dexpilot' if self.profile['hand_input']=='hands' and self.profile['hand_mode']==2 else
                                                    'stock_robotis' if self.profile['hand_input']=='hands' else
                                                    'direct_position' if direct else 'velocity_limited')
