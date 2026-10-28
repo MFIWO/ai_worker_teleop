@@ -323,9 +323,20 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                         self._head_target_clamped = None
                 if self._head_target_clamped is not None:self.last_head_command=self._head_target_clamped
                 if 'lift_joint' in self._aux_joints:self.last_lift_command=self._aux_joints['lift_joint']
+                # [CHANGED 2026-10-28] Button clicks are mode/recording controls,
+                # never an extra incremental head/lift jog in the click frame.
+                left = self.left_controller_state if isinstance(self.left_controller_state, dict) else {}
+                right = self.right_controller_state if isinstance(self.right_controller_state, dict) else {}
+                if self.joystick_mode and (left.get('thumbstick') or right.get('thumbstick')):
+                    for name in ('head_joint1', 'head_joint2', 'lift_joint'):
+                        self._aux_joints.pop(name, None)
+                    self._head_target_clamped = self.last_head_command = self.last_lift_command = None
             else:
-                # [CHANGED] Never replay a moving base after gating recovers.
+                # [CHANGED] Never replay a moving base or stale head/lift target
+                # after gate/tracking recovers. Reanchor from new measured state.
                 self._aux_base = [0., 0., 0.]
+                self._aux_joints.clear()
+                self._head_target_clamped = self.last_head_command = self.last_lift_command = None
                 self._mobile_filter.disarm('not ACTIVE / fresh')
             self._report_sticks(now,allowed)
             self._heartbeat()
