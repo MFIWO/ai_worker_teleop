@@ -264,7 +264,7 @@ the explicit validity/age markers below.
 | ages | joint receipt, gate receipt, PC intent receipt in seconds; missing=-1 |
 | clock | age of PC clock anchor, robot-minus-PC wall-clock difference in seconds |
 | controller_inputs | left trigger, left grip, right trigger, right grip (0..1); missing for optical/stale input; retained during HOLD |
-| hand_pose_state | mode (1/2), pending selection, left active pose, right active pose; 0=none, 1=full grip, 2=angled grip, 3=point, 4=thumb-out grip, 5=grip pinch (active sides only) |
+| hand_pose_state | mode (1/2), pending selection, left active pose, right active pose; 0=none, 1=full grip, 2=angled grip, 3=deep tripod (A), 4=ulnar pinch (B), 5=mode-1 legacy grip pinch (active sides only) |
 
 Recording freshness is 0.5s and is independent of the longer teleop grace
 period. Status sequence numbers reject repeated/out-of-order heartbeats. HOLD
