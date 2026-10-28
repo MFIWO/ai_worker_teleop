@@ -53,9 +53,12 @@ def make_trajectory(names, start, target, duration, num_points=100):
 
 
 class ReadyPoseMover(Node):
-    def __init__(self,model='sg2'):
+    def __init__(self,model='sg2',session_recovery=False):
         super().__init__('hardware_arm_ready_pose')
         self.model = model
+        self.session_recovery = bool(session_recovery)  # [CHANGED] only launcher-owned Cyclo stop/restart sequence
+        if self.session_recovery and model != 'sh5':
+            raise ValueError('session ready recovery supports only SH5')
         self.description_ok = False
         from std_msgs.msg import String
         from rclpy.qos import QoSProfile,DurabilityPolicy
@@ -116,7 +119,11 @@ class ReadyPoseMover(Node):
         # An already-running cyclo VR node retains its pre-move q_desired.
         # It must be started AFTER this move, not merely paused with /reactivate.
         blocked = {'vr_controller', 'leader_controller', 'ai_worker_movej_controller',
-                   'vr_trajectory_publisher', 'vr_publisher_sg2', 'vr_publisher_sh5'}
+                   'vr_publisher_sg2', 'vr_publisher_sh5'}
+        if not self.session_recovery:
+            blocked.add('vr_trajectory_publisher')
+        # [CHANGED] Only the launcher-managed recovery exempts the DISARMED PC
+        # tracking node; it MUST NOT exempt a running Cyclo controller.
         found = blocked.intersection(self.get_node_names())
         for side in ('left', 'right'):
             topic = f'/leader/joint_trajectory_command_broadcaster_{side}/joint_trajectory'
@@ -203,6 +210,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model',choices=('sg2','sh5'),default='sg2')
     parser.add_argument('--duration', type=float, default=5.)
+    parser.add_argument('--session-recovery', action='store_true',
+                        help='SH5 only: Cyclo already stopped by robot launcher; disarmed VR publisher may remain')
     parser.add_argument('--dry-run', action='store_true',
                         help='Print target only; no ROS node or motion')
     args = parser.parse_args()
@@ -215,7 +224,7 @@ def main():
         }))
         return 0
     rclpy.init(args=[])
-    node = ReadyPoseMover(args.model)
+    node = ReadyPoseMover(args.model, session_recovery=args.session_recovery)
     try:
         node.move(args.duration)
         return 0
