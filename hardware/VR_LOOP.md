@@ -131,46 +131,69 @@ from open to the original grasp (0..1). Grip retains the existing proportional
 thumb/index/middle tripod pinch, with ring/little open, and has priority over
 trigger. Face buttons retain the existing AX/BY session chords.
 
-### Hand mode 2: button-selected trigger pose
+### Hand mode 2: A/B pinches, left-grip arm clutch, right-grip ready recovery
 
-Add `--hand-mode 2` to **both** host commands (`--input controllers` required):
+Pass `--input controllers --hand-mode 2` on **both** PC and robot commands.
+This changes ONLY the explicit SH5 controller hand mode 2; controller hand mode 1
+and optical input retain their original finger behavior.
 
-| Single button tap | Next trigger pose |
+| Controller input | Mode-2 behavior |
 |---|---|
-| X | full grip |
-| Y | angled entry, then grip |
-| B | pointing: index extended, other fingers curled |
-| A | thumb placed outside first, then four-finger grip |
+| X tap (left A button) | Trigger = original full grip |
+| Y tap (left B button) | Trigger = original C-shape angled entry/grip |
+| A tap (right A button) | Trigger = **thumb + index + middle** tripod pinch; thumb joints 3/4 bend farther than former Y pose |
+| B tap (right B button) | Trigger = **thumb + ring + little** ulnar pinch; index/middle remain open |
+| Left grip held | **Clutch arms ON**: both wrists follow controllers while grip is held |
+| Left grip released | **Clutch arms HOLD**: controller hand displacement no longer drives wrists, but measured lift displacement still carries arms up/down |
+| Right grip pressed | Request a **both-arm initial ready pose**; stops arm teleop and invokes the robot-owned recovery action, then a fresh Cyclo restart |
+| A+X after ready recovery | Release both grips and A/X first, then press **A+X** to capture both real wrists and current VR zero; hold left grip to resume arm teleop |
+| Y+B | Existing full HOLD command (both buttons); does not select B pinch |
+| Both stick clicks | Toggle the existing HEAD and MOBILE joystick modes |
 
-The button selects a pose for hands whose triggers are released. Selecting Y
-smoothly forms the C-shaped `angled_prepare` rest pose while ACTIVE, even with
-zero trigger. Hands already holding a trigger retain their captured pose.
-Selection commits after a single-button release remains quiet for 150ms.
-Another face-button event during that interval cancels selection, accommodating
-cross-controller timing differences. AX start and BY HOLD,
-multiple face buttons, and partial chord releases never select a pose.
-The initial selection is full grip. Each hand captures the pending selection
-when its trigger rises above 0.05, and retains that selection until its trigger
-falls to 0.02 or below. Trigger depth still continuously controls closure.
-For example, tap X and hold the left trigger, then tap B and squeeze the right
-trigger: left retains full grip while right points. Releasing each trigger
-returns that hand to the selected rest pose (C shape for Y, open otherwise);
-the next press captures the current pending selection.
-The selected preset remains available after releasing its face button.
+Mode-2 grips **never command pinch**; only selected trigger profiles close
+fingers. Each side captures the current preset when its trigger starts closing,
+retains it while held, and releases it at zero trigger. A solo face-button tap
+commits only after 150 ms of quiet release; A+X and B+Y start/stop chords and
+partial releases never select a hand pose. Mode 1 still uses proportional grip
+for thumb/index/middle pinch.
 
-Grip remains the same proportional tripod pinch in both modes, independently
-per hand, with priority over trigger. Releasing grip while still holding a
-trigger returns to that hand's captured trigger pose. Changing pending modes
-does not change a trigger pose already being held. HOLD clears active captures;
-starting again uses the pending selection.
+A and B pinch poses start with a measured **thumb preparation stage**, then
+close the selected fingers through the existing 85%-of-URDF velocity cap and
+60 ms controller target smoothing. All new thumb/pinch joint angles are
+**simulation candidates**, not verified human-robot pinch contacts. Validate
+fingertip spacing, self-collision and grasp pressure in PhysX and tune
+`hardware/hx5_controller_poses.json` before a physical pinch test.
 
-Y continuously interpolates from the C-shaped rest pose to `angled_grip`
-according to trigger depth. Its closed target uses the original pinch for
-thumb/index/middle; ring/little copy the middle finger's flexion angles while
-retaining their C-rest roll, so they do not turn toward the thumb.
-There is no arrival wait or preparation timeout
-for Y. Mode 2 sends computed positions at the gate rate without an extra
-output filter or velocity slew limit. Mode 1 keeps its previous slew and age checks.
+**Right-grip ready recovery requires the new robot launcher.** The PC disarms
+first and waits for an explicit fresh gate acknowledgement. The robot launcher
+then stops the old Cyclo/gate process group **before** executing the existing
+five-second arms-only `hardware.ready_pose` action and starts a new Cyclo/gate
+process group afterward. It reports `READY` only after the new gate provides
+fresh healthy disarmed feedback. A+X remains blocked during recovery, and
+failure stays disarmed; inspect session logs instead of repeatedly forcing
+motion. The original SH5 follower remains running; the recovery does not move
+lift, head, mobile base, or fingers.
+
+The lift-follow correction is shared by optical and controller input. It uses
+**measured** `lift_joint` feedback to move the two wrist targets, their
+elbow/workspace hints and calibration anchors by the same vertical displacement;
+it does not apply the command target twice or change VR orientation zero.
+In mode 2, releasing the left grip freezes XR relative motion, **not** the
+lift/body frame, so lowering lift carries the hands downward.
+
+SH5 right-stick functions are exclusive: HEAD mode controls lift with vertical
+stick travel; MOBILE mode controls base yaw with horizontal travel and ignores
+lift input. Both stick clicks toggle modes. The existing left-stick head/base
+mapping and activation checks remain in effect.
+
+The final 40 finger targets pass through the robot gate at 100Hz, capped at
+85% of each physical URDF velocity limit. Mode 1 and optical hand input retain
+the same cap. This reduces speed modestly; it does not reduce holding torque
+or prove thermal protection. HOLD retains measured positions rather than
+disabling torque. Stale controller input stops updates.
+
+
+**[INTEGRATED PR #4 — trigger rate]** Controller hand mode 2 trigger **closing** is additionally limited to 50% of the configured HX5 finger velocity setting (while retaining the previous 85% URDF cap). Trigger opening is not deliberately slowed. This is independent of the 30 Hz Dynamixel packet write cadence and does not remove the arm/hand shared BulkRead limitation.
 
 Optical `--input hands --hand-mode 1` delegates landmark-to-joint processing to
 Cyclo's installed `scripts.teleop_retargeting` without thumb overrides, filter
@@ -196,17 +219,6 @@ before/after check; it is not evidence that the remaining board-side plateau
 has been resolved. The local `xr_tele` RH5DG2 reference uses a separate hand
 command thread and state-receive thread, normally at a 20 Hz command rate;
 its input/optimizer code is not substituted for the stock SH5 retargeter.
-A first positions/extends the thumb outside while holding the other fingers.
-For A the gate waits for measured preparation
-(within 0.1rad, minimum 0.12s) before closure. Failure to reach it within 3s
-raises a gate fault and holds. For A the thumb stays outside while trigger
-scales the other four fingers. This preparation sequence remains in mode 2.
-
-SH5 right-stick functions are exclusive: HEAD mode controls lift with vertical
-stick travel; MOBILE mode controls base yaw with horizontal travel and ignores
-lift input. Both stick clicks toggle modes. Existing axis signs, deadzones,
-left-stick head/base controls and activation checks remain in effect.
-
 #### SH5 controller head/mobile refinement (2026-10-28)
 
 [CHANGED] This applies to `--input controllers` with either hand mode 1 or 2;
