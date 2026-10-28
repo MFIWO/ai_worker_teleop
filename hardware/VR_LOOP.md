@@ -234,11 +234,20 @@ or ACTIVE gating disarms MOBILE and commands zero.
 
 A base moving *physically* backward while `/cmd_vel.linear.x` stays
 zero is **not** joystick drift: inspect `/odom`, swerve drive/controller
-logs, drive motor velocity and their timestamps instead. Run the first
-physical trial in a clear area with lift stationary; compare raw Vuer
-`thumbstickValue`, `[STICK INTENT]`, `/cmd_vel`, and odometry. Neither
-URDF joint limits nor collision checks should be bypassed to cure a
-latching hardware fault; read `/xr_hardware/gate_status` for its reason.
+logs, drive motor velocity and their timestamps instead. The upstream
+ROBOTIS `SwerveDriveController` declares 0.1m/s linear and 0.1rad/s
+angular velocity deadbands by default. The official
+`ffw_sh5_follower_ai_hardware_controller.yaml` sets
+`enabled_speed_limits: false`, so its listed acceleration/jerk limits
+are inactive. Together these can make the downstream wheel command
+abrupt near zero even when this PC stick ramp is continuous; check
+the *live* controller parameters and actual wheel feedback before
+retuning firmware/controller limits. This PR deliberately does not change
+wheel/steering hardware parameters. Run the first physical trial in a
+clear area with lift stationary; compare raw Vuer `thumbstickValue`,
+`[STICK INTENT]`, `/cmd_vel`, and odometry. Neither URDF joint limits nor
+collision checks should be bypassed to cure a latching hardware fault;
+read `/xr_hardware/gate_status` for its reason.
 
 HX5-D20 poses in `hx5_controller_poses.json` use 20 joints per side. The G1
 7-joint preset-selection structure and mirrored-hand convention in the local
