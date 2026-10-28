@@ -45,6 +45,12 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         if self._hand_mode not in (1,2) or (self._hand_mode==2 and not self._controller_mode):
             raise ValueError('hand mode 2 requires SH5 controller input')
         self._hand_modes = ControllerHandModes()
+        # [CHANGED] Mode-2 physical grips now control the arms, not fingers.
+        self._clutch_held = False
+        self._clutch_reanchor_pending = False
+        self._right_grip_held = False
+        self._ready_rehome_pending = False
+        self._ready_request_id = None
         self._controller_event_rx = -1e9
         self._stick_log_at = -1e9
         self._operator_keys = set()
@@ -79,12 +85,15 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             for side in SIDES}
         if not self._controller_mode:self.vuer.add_handler('HAND_MOVE')(self.on_hand_move)
         self.create_service(SetBool, '/sh5_teleop/enable', self._enable_service)
+        if self._controller_mode and self._hand_mode == 2:
+            self._ready_request_pub = self.create_publisher(String, '/xr_hardware/ready_request', 10)
+            self.create_subscription(String, '/xr_hardware/ready_state', self._ready_feedback, 10)
         if self._controller_mode:
-            self.get_logger().info('[SH5 CONTROLLERS] X+A start / Y+B HOLD; SG2 sticks; trigger=0..1 grasp, grip=3-finger pinch. Loop motion keys disabled.')
+            self.get_logger().info('[SH5 CONTROLLERS] X+A start/re-zero, Y+B HOLD; triggers drive the selected hand pose. Loop keys disabled.')
             self.get_logger().info('[STICKS] Initial HEAD mode: left=head, right up/down=lift. Both stick clicks toggle MOBILE: left=translation, right left/right=yaw. Requires ACTIVE.')
             self.get_logger().info(f'[HAND MODE {self._hand_mode}] '+(
                 'Original proportional trigger grasp; grip=thumb/index/middle pinch.' if self._hand_mode==1 else
-                'Tap X=full grip, Y=angled grip, B=point, A=thumb-out grip. Each trigger captures its own pose until released; grip pinch overrides. AX/BY reserved.'))
+                'Tap X=full grip, Y=angled grip, A=deep thumb/index/middle pinch, B=thumb/ring/little pinch. Left grip=hold-to-move arm clutch, right grip=robot ready pose then A+X VR re-zero.'))
         else:
             self.get_logger().info(
                 '[SH5 HANDS] Optical wrists -> existing HardwareXRPublisher; '
@@ -193,7 +202,8 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                         raw = float(state['triggerValue'])
                         grip = float(state.get('squeezeValue',float(bool(state.get('squeeze',False)))))
                         if not np.isfinite([raw,grip]).all():raise ValueError('nonfinite controller hand input')
-                        controls[side] = dict(trigger=self.calibrate_trigger(side,raw),grip=min(1.,max(0.,grip)))
+                        controls[side] = dict(trigger=self.calibrate_trigger(side,raw),
+                                              grip=0.0 if self._hand_mode==2 else min(1.,max(0.,grip)))  # [CHANGED]
                 except (KeyError,TypeError,ValueError):controls = None
             enabled = self.arm_control_enabled and self._phase=='ACTIVE' and not self._controller_fault_latched
             hand_controls = controls if enabled else None
@@ -203,7 +213,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             active_codes=[]
             for side in SIDES:
                 item=(hand_controls or {}).get(side,{})
-                active_codes.append(5 if item.get('grip',0.)>.05 else
+                active_codes.append(5 if self._hand_mode==1 and item.get('grip',0.)>.05 else
                     POSE_CODES.get(item.get('pose','full_grip'),0) if item.get('trigger',0.)>.02 else 0)
             return {'manual_enabled':False,'hand_input':'controllers','controller_values':controls,
                     'hand_mode':self._hand_mode,'controller_hands':hand_controls,
