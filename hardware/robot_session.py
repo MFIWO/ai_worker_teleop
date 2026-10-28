@@ -224,8 +224,10 @@ def main():
             else:
                 from hardware.build_hand_write_rate import follower_environment
                 follower_env=follower_environment()
-            print('[HAND WRITE] Existing follower driver: HX5 motor packets 30 Hz; '
-                  'arm writes/read loop unchanged. No extra hand relay.',flush=True)
+            # [CHANGED 2026-10-28] Report the bounded shared RX wait accurately.
+            print('[HAND WRITE] Existing serial/ID route, HX5 packets 30 Hz; '
+                  'shared BulkRead wait cap=60 ms; stock read failure and arm write policy retained.',
+                  flush=True)
             follower_started=True
             service('follower',['ros2','launch','ffw_bringup','ffw_sh5_follower_ai.launch.py','init_position:=false'],env=follower_env)
         else:
