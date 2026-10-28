@@ -1,0 +1,17 @@
+name: SH5 Controller-Stick Offline Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [fix/sh5-controller-head-mobile-20261028]
+
+jobs:
+  controller_stick:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax and offline stick/auxiliary regression tests
+        run: |
+          python3 -m py_compile hardware/controller_stick_motion.py robotis_vuer/robotis_vuer/vr_publisher_sh5_hands_hardware.py
+          python3 -m unittest -v hardware.test_controller_stick_motion hardware.test_aux_controls
