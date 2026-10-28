@@ -84,6 +84,129 @@ def ready(services,description,timeout=120):
         rclpy.shutdown()
 
 
+def mode2_ready_recovery_loop(children, services, controller_command):
+    """[ADDED] Robot-owned, serialized recovery: disarm -> stop Cyclo -> ready -> restart.
+
+    NEVER send a ready trajectory while Cyclo/command-gate still exists, even
+    if the VR publisher reports HOLD. No PC-side direct arm action is allowed.
+    """
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.signals import SignalHandlerOptions
+    from std_msgs.msg import String
+    from hardware.ready_recovery import decode_request, gate_disarmed, recovery_event
+
+    class ReadyListener(Node):
+        def __init__(self):
+            super().__init__('xr_sh5_ready_supervisor')
+            self.pending = None
+            self.gate = None
+            self.gate_at = -float('inf')
+            self.state_pub = self.create_publisher(String, '/xr_hardware/ready_state', 10)
+            self.request_sub = self.create_subscription(
+                String, '/xr_hardware/ready_request', self.on_request, 10)
+            self.gate_sub = self.create_subscription(
+                String, '/xr_hardware/gate_status', self.on_gate, 10)
+
+        def report(self, request_id, state, message=''):
+            self.state_pub.publish(String(data=recovery_event(request_id, state, message)))
+            print(f'[READY RECOVERY {state}] {request_id}: {message}', flush=True)
+
+        def on_request(self, msg):
+            try:
+                request_id = decode_request(msg.data)
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
+                self.get_logger().warning('Invalid right-grip request: ' + str(error))
+                return
+            if self.pending is not None:
+                self.report(request_id, 'FAILED', 'Recovery already pending; release right grip')
+                return
+            self.pending = request_id, time.monotonic()
+            self.report(request_id, 'WAIT_DISARM', 'Waiting for fresh disarmed hardware gate')
+
+        def on_gate(self, msg):
+            try:
+                payload = json.loads(msg.data)
+                if isinstance(payload, dict) and payload.get('model') == 'sh5':
+                    self.gate, self.gate_at = payload, time.monotonic()
+            except (ValueError, TypeError):
+                pass
+
+    def check_processes(skip=()):
+        for name, process in (*children, *services):
+            if name == 'head JPEG loader' or name in skip:
+                continue
+            code = process.poll()
+            if code is not None:
+                raise RuntimeError(f'{name} exited ({code}) during right-grip recovery')
+
+    rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
+    node = ReadyListener()
+    try:
+        while True:
+            check_processes()
+            rclpy.spin_once(node, timeout_sec=.05)
+            if node.pending is None:
+                continue
+            request_id, requested_at = node.pending
+            now = time.monotonic()
+            if not gate_disarmed(node.gate, node.gate_at, now):
+                if now - requested_at > 6.0:
+                    node.report(request_id, 'FAILED',
+                                'Hardware gate did not acknowledge a fresh DISARMED state')
+                    raise RuntimeError('Right-grip ready recovery disarm timeout')
+                continue
+            previous_gate_instance = node.gate['gate_instance']
+            node.report(request_id, 'MOVING', 'Disarm acknowledged; stopping old Cyclo first')
+            # [CHANGED] Remove before stop; the complete owned process tree is
+            # awaited by stop(), including reference checker, gate and Cyclo.
+            old = next((item for item in children if item[0] == 'controller'), None)
+            if old is None:
+                raise RuntimeError('Robot controller process missing; ready move refused')
+            children.remove(old)
+            stop(old[1])
+            check_processes()
+            # [CHANGED] The existing original ready_pose action is allowed only
+            # after the old Cyclo/gate process group is fully gone.
+            move = start([sys.executable, '-m', 'hardware.ready_pose',
+                          '--model', 'sh5', '--duration', '5', '--session-recovery'])
+            item = ('arms-only ready', move)
+            children.append(item)
+            try:
+                while move.poll() is None:
+                    check_processes(skip=('arms-only ready',))
+                    time.sleep(.1)
+                if move.returncode != 0:
+                    raise RuntimeError(f'Right-grip ready trajectory failed ({move.returncode})')
+            finally:
+                # Keep failed processes in the session cleanup if still alive.
+                if move.poll() is not None:
+                    children.remove(item)
+            node.report(request_id, 'RESTARTING',
+                        'Measured arms at ready pose; restarting fresh Cyclo/gate')
+            fresh = start(controller_command)
+            children.append(('controller', fresh))
+            deadline = time.monotonic() + 90.0
+            while True:
+                check_processes()
+                rclpy.spin_once(node, timeout_sec=.1)
+                if (node.gate is not None
+                        and node.gate['gate_instance'] != previous_gate_instance
+                        and gate_disarmed(node.gate, node.gate_at, time.monotonic())):
+                    node.report(request_id, 'READY',
+                                'Fresh gate verified; release grips and A/X, press A+X for VR zero')
+                    node.pending = None
+                    break
+                if time.monotonic() > deadline:
+                    node.report(request_id, 'FAILED',
+                                'Restarted Cyclo/gate did not reach fresh disarmed feedback')
+                    raise RuntimeError('Right-grip ready controller restart timed out')
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--pc-ip',required=True,type=ipv4)
@@ -197,7 +320,12 @@ def main():
             children.append(('VR Loop',start(loop)))
         print('[SESSION] Closing either terminal stops motion; after 3s, stop SH5 follower and verify finger torque OFF. '
               f'Service logs: {logs}',flush=True)
-        wait([item for item in children if item[0]!='head JPEG loader'],services)
+        if args.input == 'controllers' and args.hand_mode == '2':
+            # [CHANGED] Supervisor exists only for the explicit SH5 mode-2
+            # button mapping; mode-1 and optical control behavior is unchanged.
+            mode2_ready_recovery_loop(children, services, controller)
+        else:
+            wait([item for item in children if item[0]!='head JPEG loader'],services)
     except KeyboardInterrupt:pass
     finally:
         closing.set()
