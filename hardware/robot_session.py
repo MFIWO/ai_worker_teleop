@@ -109,6 +109,7 @@ def mode2_ready_recovery_loop(children, services, controller_command):
                 String, '/xr_hardware/gate_status', self.on_gate, 10)
 
         def report(self, request_id, state, message=''):
+            self.last_report = (request_id, state)  # [DEBUG] no duplicate FAILED on exceptions
             self.state_pub.publish(String(data=recovery_event(request_id, state, message)))
             print(f'[READY RECOVERY {state}] {request_id}: {message}', flush=True)
 
@@ -201,6 +202,13 @@ def mode2_ready_recovery_loop(children, services, controller_command):
                     node.report(request_id, 'FAILED',
                                 'Restarted Cyclo/gate did not reach fresh disarmed feedback')
                     raise RuntimeError('Right-grip ready controller restart timed out')
+    except Exception as error:
+        # [CHANGED] Never leave an operator with a silent, indefinitely
+        # pending recovery after controller shutdown or action rejection.
+        if (node.pending is not None
+                and getattr(node, 'last_report', None) != (node.pending[0], 'FAILED')):
+            node.report(node.pending[0], 'FAILED', str(error))
+        raise
     finally:
         node.destroy_node()
         if rclpy.ok():
