@@ -1,0 +1,21 @@
+name: Loop training recording contract
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  offline-loop-contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Parse modified modules
+        run: |
+          python -m compileall -q hardware/loop_clock.py hardware/loop_channels.py hardware/loop_vr_streamer.py hardware/robot_session.py hardware/teleop_cli.py
+      - name: Check typed tactile isolation and training channel selection
+        run: python -m unittest hardware.test_loop_split hardware.test_loop_vr
