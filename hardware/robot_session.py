@@ -412,7 +412,7 @@ def main():
             # PR #1 Loop streaming and PR #4 HX5 driver remain unchanged.
             mode2_ready_recovery_loop(children, services, controller)
         else:
-    wait([item for item in children if item[0]!='head JPEG loader'],services)
+            wait([item for item in children if item[0]!='head JPEG loader'],services)
     except KeyboardInterrupt:pass
     finally:
         closing.set()
