@@ -227,20 +227,21 @@ commands. That mode retains V start/HOLD/resume and the C review-key mapping.
 
 ## Recording behavior
 
-In Loop Preview, select the separate Robot State sources **aiworker**
-(source key **robotis-vr-sh5**) and **HX5-D20**
-(source key **robotis-vr-sh5-hand**). These are the two Robot State sources;
-no separate Tactile source is registered. Robot State uses robot type
-**ffw_sh5_vr**, action space **joint_position**, and finger type **HX5-D20**.
-The robot source carries arm/body data; the hand source carries hand joint
-observations, commands, raw tactile pressure, and controller metadata.
-Remove or Ignore the old combined **AI Worker VR / HX5-D20** and separate
-**robotis-vr-sh5-tactile**
-entry in saved Preview settings, then save the separate source selections.
-Updating code does not migrate saved Loop settings. If the old source is
-still live, check for an older streamer process before removing its entry.
-Select the
-camera sources exposed by the existing robot camera implementation. Start,
+In Loop Preview, select ONE Robot State source, **aiworker** (key:
+robotis-vr-sh5). This schema now contains BOTH robot and HX5-D20 hand qpos.
+The independent **HX5-D20** source (key robotis-vr-sh5-tactile) has kind
+**Tactile**, not Robot State. Retire the old robotis-vr-sh5-hand Robot State
+source and re-save the Loop cell configuration: the aiworker key is
+unchanged but its channel layout has changed.
+
+Robot State uses robot type ffw_sh5_vr, action space joint_position, and
+finger type HX5-D20. The default **training** profile selects robot and
+hand joint observations/actions plus teleop.flags and teleop.action_valid.
+On the robot command, use --loop-channels qpos|training|all or an exact
+comma-separated key list. --loop-no-tactile omits the independent tactile
+source; --loop-no-camera is separate. See hardware/LOOP_SOURCE_SPLIT.md.
+Select camera sources exposed by the existing robot camera implementation.
+Start,
 finish, save and discard the episode in Loop as usual. The wrapper never
 invokes Loop's recording start/stop/save/delete API.
 
@@ -271,15 +272,11 @@ serial connection or starts a tactile grasp controller. The official current
 SH5 follower launch includes `pressure_l_broadcaster` and
 `pressure_r_broadcaster`; older installed workspaces may not have these.
 
-Each hand's existing observation/action joint-position vectors still contain
-20 joints. The same source adds these channels beneath
-`ffw_sh5_vr.observation.left_hand` and `.right_hand`:
-
-| Suffix | Entries |
-|---|---|
-| tactile_pressure | 45 unsigned raw readings (0..255); 5 sensors x 3 x 3 |
-| tactile_status | received, valid_message, fresh, observed_receipt_hz |
-| tactile_timing | receipt age in seconds (-1=missing), ROS header stamp in seconds (-1=missing), local receipt sequence |
+Each hand's 20-joint observation/action vectors are part of **aiworker**
+Robot State. The independent **HX5-D20 Tactile** source carries two typed
+channels, left_hand and right_hand, each with up to 45 raw uint8 readings.
+No tactile_pressure, tactile_status or tactile_timing channel is declared
+on the aiworker Robot State schema.
 
 Pressure ordering is `finger_l_sensor1..5` / `finger_r_sensor1..5`, each with
 `Present Pressure 1..9` in row-major order (top to bottom, left to right).
@@ -287,19 +284,14 @@ The adapter resolves both sensor names and pressure names; array arrival order
 does not change this layout. Sensor numbers are kept verbatim rather than
 guessing their anatomical finger names. Missing/duplicate sensors, invalid
 interface names and values outside 0..255 invalidate that hand's sample.
-Malformed or older-than-0.5-second pressures are `None`, not fabricated zeros.
-Status/timing continue even when pressure is missing; `valid_message` describes
-the last message, while `fresh` additionally checks receipt age. Receipt Hz
-measures callback arrival, not the hardware sampling clock or sensor health.
+Malformed or older-than-0.5-second pressures are omitted, not
+fabricated zeros. Local status, receipt timing and validity checks remain
+in the parser, but are not automatically sent as robot state channels.
 
-The HX5-D20 hand source sends the latest raw readings on its existing 30 Hz
-recording clock, alongside joint values, including during V/HOLD. It does not
-preserve every upstream frame if the pressure publisher runs faster; header
-stamps, receipt sequence and arrival rate make reuse/downsampling visible.
-Raw pressure is not calibrated Newton force. No baseline subtraction or
-RH5DG2 force/proximity/palm conversion is applied. These are robot channels in
-the existing Preview/recording source; this change does not add a custom hand
-heatmap widget to the Loop application.
+The HX5-D20 typed Tactile source uses the same 30 Hz PC-anchored clock
+and tick sequence as aiworker. Upstream frames faster than 30 Hz are not
+all preserved. Raw pressure is not calibrated Newton force. No baseline
+subtraction or RH5DG2 force/proximity/palm conversion is applied.
 
 After deployment, with the follower already running, these commands only read
 the active controllers/topics inside `ai_worker` (source ROS/workspace first,
@@ -324,7 +316,7 @@ not by whichever order a message happens to use. A missing/incomplete group is
 `None`. Latest action values may remain present during HOLD, accompanied by
 the explicit validity/age markers below.
 
-`ffw_sh5_vr.teleop.*` contains:
+`ffw_sh5_vr.teleop.*` channels are available when selected (the default training profile keeps only flags and action_valid; qpos omits all teleop fields; all keeps every field):
 
 | Channel | Vector entries |
 |---|---|
