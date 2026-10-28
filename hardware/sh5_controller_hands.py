@@ -115,6 +115,11 @@ class SH5HandOutput:
             if any(('pose' in item)!=(self.hand_mode==2) for item in self.controls.values()):
                 self.controls = None
                 raise ValueError('PC/robot controller hand modes do not match')
+        # [CHANGED] In mode 2, physical grips are ARM clutch / ready-reset controls,
+        # never a competing finger command. Mode 1 retains its old tripod pinch.
+        if self.controls is not None and self.hand_mode == 2:
+            for item in self.controls.values():
+                item['grip'] = 0.0
         self.rx = now
 
     def native_trajectory(self,side,msg):
@@ -173,7 +178,7 @@ class SH5HandOutput:
     def prepare_targets(self,desired,measured,now):
         for side,item in self.controls.items():
             pose = item.get('pose')
-            if pose!='thumb_out_grip' or item['trigger']<=.02 or item['grip']>.05:
+            if pose not in ('tripod_deep', 'ulnar_pinch') or item['trigger']<=.02:  # [CHANGED] prepare both selected pinches
                 self.preparing.pop(side,None)
                 continue
             names=FINGER_NAMES[side]
@@ -183,8 +188,8 @@ class SH5HandOutput:
                     'held':{name:measured[name] for name in names}}
             state=self.preparing[side]
             if state['done']:continue
-            # Place the thumb outside first, keeping other fingers where
-            # they were. Full thumb preparation also applies at low depth.
+            # [CHANGED] Preposition the thumb for either pinch before closing the
+            # selected fingers. Measured arrival and URDF slew are preserved.
             prep=dict(state['held'])
             prep.update(zip(names[:4],self.poses[side][pose][:4]))
             checked=names[:4]
