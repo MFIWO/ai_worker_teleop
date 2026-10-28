@@ -17,6 +17,8 @@ jobs:
           python-version: '3.12'
       - name: Compile modified Python sources without importing ROS or touching hardware
         run: python -m compileall -q hardware
+      - name: Install trace test dependency
+        run: python -m pip install PyYAML==6.0.3
       - name: Run hand input, bounded-read overlay and trace unit tests
         run: |
           python -m unittest -v \
