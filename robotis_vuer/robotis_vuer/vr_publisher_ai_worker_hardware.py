@@ -121,6 +121,7 @@ class HardwareXRPublisher(XROverheadPublisher):
         self._aux_joints = {}
         self._aux_base = [0., 0., 0.]
         self._head_target_clamped = None
+        self._lift_follow_position = None  # [CHANGED] SH5 measured lift baseline for arm-frame following.
         self._tracking_waiting = False
         super().__init__(start_server=False)
         self.head_joint_pub = AuxiliarySink(self)
@@ -453,6 +454,9 @@ class HardwareXRPublisher(XROverheadPublisher):
             self._goals = previous
             self._resume_bridge_rx = time.monotonic()
         self._path_frame = None
+        # [CHANGED] Each capture starts from its current measured lift height.
+        # The next snapshot must add only the displacement SINCE this capture.
+        self._lift_follow_position = float(self.lift_joint_current_position)
 
     def _tracking_input_state(self, now=None):
         now = time.monotonic() if now is None else now
@@ -652,27 +656,51 @@ class HardwareXRPublisher(XROverheadPublisher):
 
     def _snapshot(self):
         links = super()._snapshot()
-        if self.hardware_model == 'sg2' and self._session is not None:
+        if self._session is None:
+            return links
+        if self.hardware_model == 'sh5':
+            # [CHANGED] The SH5 lift is a vertical prismatic joint. VR inputs
+            # are relative to base_link; without transporting the reference the
+            # arm QP counter-moves to HOLD a world-fixed wrist as lift descends.
+            # Use real joint feedback (not the last commanded lift) to translate
+            # BOTH arms by one common displacement, including clutch/HOLD frames.
+            current = float(self.lift_joint_current_position)
+            if not np.isfinite(current):
+                raise ValueError('nonfinite measured SH5 lift')
+            previous = self._lift_follow_position
+            self._lift_follow_position = current
+            dz = 0.0 if previous is None else current - previous
+            deltas = {side: np.array([0.0, 0.0, dz]) for side in SIDES}
+        else:
+            deltas = {}
             for side, template in self._session.templates.items():
                 delta = links[side]['shoulder'][:3, 3] - template.shoulder
-                if np.linalg.norm(delta) < 1e-9:
-                    continue
-                # base_link follows the mobile base. Only measured vertical
-                # lift translation changes the shoulder in this frame.
+                if not np.isfinite(delta).all():
+                    raise ValueError('nonfinite measured shoulder change')
+                # SG2 legacy behavior preserved: only measured vertical lift
+                # translation may move the shoulder in base_link.
                 if np.linalg.norm(delta[:2]) > .005:
                     raise ValueError('unexpected horizontal shoulder/model change')
-                self._session.mapper.anchors[side].robot_pose[:3, 3] += delta
-                for hints in (self._session.templates, self._hints):
-                    hint = hints.get(side)
-                    if hint is None:
-                        continue
-                    hint.shoulder += delta
-                    hint.previous += delta
-                    if hasattr(hint, 'path_anchor'):
-                        hint.path_anchor += delta
-                for poses in (self._goals, self._elbows):
-                    if side in poses:
-                        poses[side][:3, 3] += delta
+                deltas[side] = delta
+        # [CHANGED] Transport every anchor, hint and in-flight target exactly
+        # once per measured lift increment. Preserve wrist orientations and
+        # human input anchors; never modify an unverified motor joint command.
+        for side, delta in deltas.items():
+            if np.linalg.norm(delta) < 1e-9:
+                continue
+            self._session.mapper.anchors[side].robot_pose[:3, 3] += delta
+            for hints in (self._session.templates, self._hints):
+                hint = hints.get(side)
+                if hint is None:
+                    continue
+                hint.shoulder += delta
+                hint.previous += delta
+                if hasattr(hint, 'path_anchor'):
+                    hint.path_anchor += delta
+            for poses in (self._goals, self._elbows, self._last_published,
+                          self._resume_bridge_targets or {}):
+                if side in poses:
+                    poses[side][:3, 3] += delta
         return links
 
 

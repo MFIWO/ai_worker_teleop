@@ -8,7 +8,7 @@ import time
 
 from hardware.loop_vr_contract import RecordingStatus, vr_parameters
 from hardware.loop_clock import PCRecordingClock,SplitRobotStreamer
-from hardware.hx5_tactile import HAND_MODEL,PRESSURE_TOPICS,TactileReadings,channel_layout
+from hardware.hx5_tactile import HAND_MODEL,PRESSURE_TOPICS,TactileReadings
 
 
 def main():
@@ -17,6 +17,9 @@ def main():
     parser.add_argument('--robot-ip', required=True)
     parser.add_argument('--fps', type=float, default=30.)
     parser.add_argument('--no-camera', action='store_true')
+    # CHANGED(2026-10-28): recording-only channel profile; VR control is unchanged.
+    parser.add_argument('--channels', default='training', help='training | qpos | all | comma-separated channel keys')
+    parser.add_argument('--no-tactile', action='store_true', help='do not register the HX5-D20 Tactile source')
     parser.add_argument('--describe', action='store_true')
     args = parser.parse_args()
     import yaml
@@ -38,7 +41,7 @@ def main():
 
     class VRMapper(RobotStepMapper):
         def channel_infos(self):
-            return super().channel_infos() + [ChannelInfo(**info) for info in channel_layout(self.robot_type)] + [ChannelInfo(
+            return super().channel_infos() + [ChannelInfo(
                 key=f'{self.robot_type}.teleop.{name}', label=label, unit=unit, group='teleop')
                 for name, label, unit in (
                     ('flags', 'active,paused,manual_active,fault,status_fresh', 'bool'),
@@ -54,6 +57,8 @@ def main():
         def __init__(self):
             self.recording_status = RecordingStatus()
             self.recording_clock = PCRecordingClock()
+            self.record_channels = args.channels
+            self.enable_tactile = not args.no_tactile
             self.tactile = TactileReadings()
             self._tactile_reported = {}
             # Reuse installed subscriber/camera methods, while selecting a public
@@ -85,9 +90,23 @@ def main():
             self._warned_missing_joints=False
             self._qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT,history=HistoryPolicy.KEEP_LAST)
             self._init_subscribers()
-            self._init_tactile_subscribers()
-            self.robot_streamer=SplitRobotStreamer(self.loop_addr,self.mapper,self.recording_clock)
+            if self.enable_tactile:
+                self._init_tactile_subscribers()
+            # CHANGED(2026-10-28): one aiworker Robot State for arm/hand qpos.
+            self.robot_streamer = SplitRobotStreamer(
+                self.loop_addr, self.mapper, self.recording_clock,
+                channels=self.record_channels, enable_tactile=self.enable_tactile)
+            selected_keys = self.robot_streamer.robot.channel_keys
+            if (any('.action.' in key for key in selected_keys) and
+                    f'{self.robot_type}.teleop.action_valid' not in selected_keys):
+                self.get_logger().warning(
+                    '[Loop training] Action channels selected without action_valid; '
+                    'cached HOLD commands may be unsuitable for imitation learning')
             self.robot_streamer.connect()
+            self.get_logger().info(
+                f'Loop aiworker ({len(selected_keys)} selected channels: '
+                f'{self.record_channels}); typed HX5-D20 tactile={self.enable_tactile}; '
+                f'keys={selected_keys}')
             self.camera_streamer=None
             self._probe_started_at=time.monotonic()
             self._probe_timer=(self.create_timer(self.PROBE_PERIOD_S,self._probe_cameras)
@@ -166,7 +185,8 @@ def main():
                 leader_positions=self._collect_leader_positions(),mobile_state=mobile,
                 mobile_command=self._twist_vector(self._leader_mobile_msg))
             payload.update({f'{self.robot_type}.teleop.{k}':v for k,v in self.recording_status.values(now).items()})
-            payload.update(self.tactile.payload(self.robot_type,now))
+            if self.enable_tactile:
+                payload.update(self.tactile.payload(self.robot_type,now))
             # Keep raw button depths during HOLD; they are inputs, not actions.
             controls = None
             receipt = self.recording_status.intent_rx
@@ -187,7 +207,7 @@ def main():
                         and all(0<=v<=5 for v in raw_state[2:])):
                     state=[float(v) for v in raw_state]
             payload[f'{self.robot_type}.teleop.hand_pose_state']=state
-            if self._tick_count and self._tick_count % max(1,int(self.fps*10)) == 0:
+            if self.enable_tactile and self._tick_count and self._tick_count % max(1,int(self.fps*10)) == 0:
                 for side,receipt in self.tactile.receipts.items():
                     if receipt is None or now-receipt > self.tactile.freshness:
                         self.get_logger().warning(

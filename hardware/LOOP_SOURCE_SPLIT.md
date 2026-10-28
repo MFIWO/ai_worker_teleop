@@ -1,95 +1,114 @@
-# VR robot, hand and tactile sources
+# VR Loop recording: unified aiworker state and HX5-D20 tactile
 
-`--loop vr` now declares three independent data sources. Camera sources are
-unchanged. This code does not start or stop recordings.
+Updated 2026-10-28. Replaces the previous three-source description. This
+changes recording, not arm/hand teleoperation, camera transport, or motor
+commands. The GitHub change does not update running PC/robot containers.
 
-| Kind | Registration key | Contents |
-| --- | --- | --- |
-| Robot State | `robotis-vr-sh5` | `aiworker`: arms, head, lift, mobile, teleop diagnostics |
-| Robot State | `robotis-vr-sh5-hand` | Hand joint observations/actions, tactile health/timing, controller inputs |
-| Tactile | `robotis-vr-sh5-tactile` | `HX5-D20`: `left_hand`, `right_hand`, 45 raw uint8 samples each |
+## Loop Preview sources
 
-Pressure uses `SourceProducer.send_tactile`, not robot state channels. The
-pressure order is fingers 1 through 5, each with row-major 3 by 3 sensors, as
-validated by `hx5_tactile.py`. Missing or stale pressure is omitted. Joint
-angles remain Robot State readings; they are not tactile measurements.
+| Kind | Source key | Display name | Contents |
+|---|---|---|---|
+| Robot State | robotis-vr-sh5 | aiworker | Robot and both HX5-D20 hand qpos; selected actions/quality fields |
+| Tactile | robotis-vr-sh5-tactile | HX5-D20 | left_hand and right_hand, each 45 raw uint8 fingertip measurements |
 
-All three senders share one PC-anchored microsecond timestamp and tick sequence.
-Existing channel names are retained for robot/hand state. The existing robot
-source key is retained; its layout no longer includes hand channels. Existing
-recording configurations therefore require source/layout compatibility checks
-before recording. A display name alone does not identify a stored source.
+There is exactly ONE Robot State source. Do not select the retired
+robotis-vr-sh5-hand Robot State source. The tactile source uses
+SourceSchema(tactile=TactileStreamSchema(...)) with send_tactile(),
+rather than putting tactile_pressure in Robot State.
+The robotis-vr-sh5 source key is unchanged but its layout changes:
+re-select and re-save the Loop cell configuration. Neither sender can
+automatically migrate a saved Loop configuration.
 
-On 2026-10-27 the user confirmed the tactile name `HX5-D20`. An isolated,
-read-only recorder registered all three sources with the running Loop app;
-`/preview/sources` confirmed `aiworker` and Hand as `robot`, and `HX5-D20` as
-`tactile`, with the layout above. No test pressure or robot readings were sent
-to the live Loop app and no recording was started.
+Robot qpos and hand qpos are matched by ROS joint names. Missing groups
+are None, not zeros or copied from action. Both sources use the same
+PC-anchored timestamp/tick sequence. If a pressure sample is missing,
+invalid, or stale, its Tactile channel is omitted, never zero-filled.
+HOLD does not stop recording; fresh/valid action flags matter at export.
 
-The three changed runtime modules (`loop_clock.py`, `loop_vr_streamer.py`,
-`host_lease.py`) were installed in robot container
-`/workspace/ai_worker_xr/hardware/`, with numbered backups. SHA-256 hashes
-matched the local files. The PC source is already bind-mounted from this
-checkout. The original two teleop commands can be used on the next run.
+## Choose training channels
 
-The saved `test_ffw_sg2_hx5` configuration itself could not be inspected:
-`/cell-configs` requires authentication (HTTP 401). A matching display name
-does not prove that a saved source identity/layout matches the new sender.
-In Loop select the available `aiworker`, Hand and `HX5-D20` sources when updating
-that configuration. Real sensor reception and an actual saved episode still
-require verification during a physical session; no follower was running during
-this deployment.
+Set --loop-channels on the ROBOT terminal invocation (not the PC terminal).
+This is an SDK schema allowlist, not a post-recording dataset filter:
 
-## Stop investigation
+- training (default): observation + action joint positions for left_arm (7),
+  right_arm (7), left_hand (20), right_hand (20), head (2), lift (1),
+  and teleop.flags plus teleop.action_valid. 14 channels total.
+  Mobile velocity and all other diagnostics are excluded.
+- qpos: six observation joint_position channels for arms, hands, head and lift,
+  without actions/teleop/velocity.
+- all: all mapped joint obs/action channels, mobile velocity, teleop metadata;
+  raw pressure stays in the independent HX5-D20 Tactile source.
+- Custom: an exact comma-separated list of keys, either with or without
+  the ffw_sh5_vr. prefix. Unknown/duplicate/empty keys fail at startup.
+  Example: observation.left_arm.joint_position,observation.left_hand.joint_position,teleop.flags
 
-The PC container's `/tmp/sh5_pc_session_exit.log` contained
-`Host terminal/connection lease ended`. The old message did not distinguish
-stdin EOF, explicit Ctrl+C, or a host heartbeat timeout. `host_lease.py` now
-logs that distinction without changing the three-second timeout.
+The six joint groups are left_arm, right_arm, left_hand, right_hand, head,
+and lift. The available keys are in these forms:
 
-Optical tracking freshness is 0.5 seconds; already active sessions may hold
-unchanged goals and recover until input age exceeds five seconds. Partial hand
-frames do not refresh tracking liveness. Full-frame retarget failures can still
-disable the arm session. No limit, collision check or motor error guard has been
-relaxed based on the connection-exit message. Actual repeated STOP/FAULT events
-from the PC publisher are needed to identify the cause of recurrent motion holds.
+    ffw_sh5_vr.observation.GROUP.joint_position
+    ffw_sh5_vr.action.GROUP.joint_position
 
-## Validation
+Mobile velocity keys (only under all or custom) are
+ffw_sh5_vr.observation.mobile.velocity and
+ffw_sh5_vr.action.mobile.velocity.
 
-Run `python3 -m unittest hardware.test_loop_vr hardware.test_loop_split`.
-The installed SDK schema/encoding test is skipped where loop-sdk is absent;
-run it inside the robot container with its `/opt/venv` site-packages available.
-Tests do not connect to Loop, start ROS nodes or command motors.
+Each joint group uses radians except lift (meters). For behavior cloning,
+retain teleop.action_valid: its seven entries correspond to left_arm,
+right_arm, left_hand, right_hand, head, lift, mobile. Cached actions may
+remain present during HOLD; exclude invalid action frames from training.
+teleop.flags is [active,paused,manual_active,fault,status_fresh].
+If you choose only raw qpos, you intentionally lose the validity mask.
 
-The robot container passed three SDK/unit tests and one isolated ROS callback
-test on localhost/domain 232 with a fake SDK sink. The callback test verifies
-continuous HOLD recording, separate robot/hand layouts, shared timestamps,
-the typed tactile declaration, and clean shutdown.
+--loop-no-tactile disables registration and subscriptions for the separate
+Tactile source, but keeps hand qpos inside aiworker. --loop-no-camera is
+independent. Neither changes motor control, follower setup or ROS feedback.
 
-The existing `hardware.test_tracking_grace` AST fixture omits the production
-`FEEDBACK_MAX_AGE` constant and currently raises `AttributeError`; that suite
-cannot validate production behavior without fixing its fixture/expectations.
+## Commands on PC host (replace PC_IP and ROBOT_IP)
 
-## Native hand boundary fault (2026-10-27)
+Default training and typed Tactile, robot terminal:
 
-User logs repeatedly reported `native hand target outside physical bounds`
-within 0.1–0.8 seconds of ACTIVE. The installed native retargeter selects the
-HX5-D20 model; its optimizer's `set_joint_limit` expands each limit by 0.001 rad.
-The gate previously accepted only 0.0001 rad numerical overshoot, so ordinary
-boundary solutions could fault the entire session. The incoming solver margin
-is now 0.001001 rad (including floating-point allowance), and accepted targets
-are clamped to the unchanged physical URDF bounds before slew limiting/output.
-Larger violations and nonfinite targets still latch a fault, now including the
-joint name, target and limits. The mismatch is confirmed in code; exact values
-of the user's original rejected targets were not recorded, so a physical rerun
-is still required to verify that this resolves those incidents.
+~~~bash
+bash ~/Downloads/external_repos/ai_worker_teleop/teleop.sh robot \
+  --pc-ip PC_IP --robot-ip ROBOT_IP --loop vr \
+  --input hands --hand-mode 1 --bringup
+~~~
 
-`hardware.test_native_hand_bounds` covers both hands, both boundary directions,
-clamping, gross overshoot, nonfinite data and invalid joint names. No physical
-controller, motor or recording is started by these tests.
+Robot + hand qpos only, omit tactile:
 
-The retired display name `AI Worker VR / HX5-D20` is no longer registered by
-this code. Existing saved cell-config entries can still reference it; remove or
-ignore that entry in Loop and select the separated sources. The live source
-list was empty after the user's sessions stopped, so no obsolete live source
-could be hidden through `/preview/sources/{id}/selection` at inspection time.
+~~~bash
+bash ~/Downloads/external_repos/ai_worker_teleop/teleop.sh robot \
+  --pc-ip PC_IP --robot-ip ROBOT_IP --loop vr \
+  --input hands --hand-mode 1 --bringup \
+  --loop-channels qpos --loop-no-tactile
+~~~
+
+Choose exact channels:
+
+~~~bash
+bash ~/Downloads/external_repos/ai_worker_teleop/teleop.sh robot \
+  --pc-ip PC_IP --robot-ip ROBOT_IP --loop vr \
+  --input controllers --hand-mode 2 --bringup \
+  --loop-channels 'observation.left_arm.joint_position,observation.right_arm.joint_position,observation.left_hand.joint_position,observation.right_hand.joint_position,action.left_arm.joint_position,action.right_arm.joint_position,action.left_hand.joint_position,action.right_hand.joint_position,teleop.flags,teleop.action_valid'
+~~~
+
+The PC terminal command is unchanged: teleop.sh pc --pc-ip PC_IP
+--robot-ip ROBOT_IP --loop vr --input hands|controllers.
+
+Tactile subscriptions use /left_hand/finger_pressures and
+/right_hand/finger_pressures (robotis_interfaces/msg/HandPressures).
+An absent ROS message type or topic produces a warning rather than fake
+readings. Verify with ros2 topic echo inside the robot's running environment.
+
+## Offline checks and limitations
+
+~~~bash
+python3 -m unittest hardware.test_loop_split hardware.test_loop_vr
+~~~
+
+The real SDK schema test is skipped when loop_sdk is not installed;
+run inside the ai_worker container to check installed SDK classes.
+The optional isolated ROS test is hardware.test_loop_vr_runtime with
+ROS_DOMAIN_ID=232 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp.
+These tests use mock sinks and do not command motors or create Loop recordings.
+A physical Preview source-type check and actual short saved episode inspection
+are still required before trusting training data.

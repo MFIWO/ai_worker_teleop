@@ -131,46 +131,69 @@ from open to the original grasp (0..1). Grip retains the existing proportional
 thumb/index/middle tripod pinch, with ring/little open, and has priority over
 trigger. Face buttons retain the existing AX/BY session chords.
 
-### Hand mode 2: button-selected trigger pose
+### Hand mode 2: A/B pinches, left-grip arm clutch, right-grip ready recovery
 
-Add `--hand-mode 2` to **both** host commands (`--input controllers` required):
+Pass `--input controllers --hand-mode 2` on **both** PC and robot commands.
+This changes ONLY the explicit SH5 controller hand mode 2; controller hand mode 1
+and optical input retain their original finger behavior.
 
-| Single button tap | Next trigger pose |
+| Controller input | Mode-2 behavior |
 |---|---|
-| X | full grip |
-| Y | angled entry, then grip |
-| B | pointing: index extended, other fingers curled |
-| A | thumb placed outside first, then four-finger grip |
+| X tap (left A button) | Trigger = original full grip |
+| Y tap (left B button) | Trigger = original C-shape angled entry/grip |
+| A tap (right A button) | Trigger = **thumb + index + middle** tripod pinch; thumb joints 3/4 bend farther than former Y pose |
+| B tap (right B button) | Trigger = **thumb + ring + little** ulnar pinch; index/middle remain open |
+| Left grip held | **Clutch arms ON**: both wrists follow controllers while grip is held |
+| Left grip released | **Clutch arms HOLD**: controller hand displacement no longer drives wrists, but measured lift displacement still carries arms up/down |
+| Right grip pressed | Request a **both-arm initial ready pose**; stops arm teleop and invokes the robot-owned recovery action, then a fresh Cyclo restart |
+| A+X after ready recovery | Release both grips and A/X first, then press **A+X** to capture both real wrists and current VR zero; hold left grip to resume arm teleop |
+| Y+B | Existing full HOLD command (both buttons); does not select B pinch |
+| Both stick clicks | Toggle the existing HEAD and MOBILE joystick modes |
 
-The button selects a pose for hands whose triggers are released. Selecting Y
-smoothly forms the C-shaped `angled_prepare` rest pose while ACTIVE, even with
-zero trigger. Hands already holding a trigger retain their captured pose.
-Selection commits after a single-button release remains quiet for 150ms.
-Another face-button event during that interval cancels selection, accommodating
-cross-controller timing differences. AX start and BY HOLD,
-multiple face buttons, and partial chord releases never select a pose.
-The initial selection is full grip. Each hand captures the pending selection
-when its trigger rises above 0.05, and retains that selection until its trigger
-falls to 0.02 or below. Trigger depth still continuously controls closure.
-For example, tap X and hold the left trigger, then tap B and squeeze the right
-trigger: left retains full grip while right points. Releasing each trigger
-returns that hand to the selected rest pose (C shape for Y, open otherwise);
-the next press captures the current pending selection.
-The selected preset remains available after releasing its face button.
+Mode-2 grips **never command pinch**; only selected trigger profiles close
+fingers. Each side captures the current preset when its trigger starts closing,
+retains it while held, and releases it at zero trigger. A solo face-button tap
+commits only after 150 ms of quiet release; A+X and B+Y start/stop chords and
+partial releases never select a hand pose. Mode 1 still uses proportional grip
+for thumb/index/middle pinch.
 
-Grip remains the same proportional tripod pinch in both modes, independently
-per hand, with priority over trigger. Releasing grip while still holding a
-trigger returns to that hand's captured trigger pose. Changing pending modes
-does not change a trigger pose already being held. HOLD clears active captures;
-starting again uses the pending selection.
+A and B pinch poses start with a measured **thumb preparation stage**, then
+close the selected fingers through the existing 85%-of-URDF velocity cap and
+60 ms controller target smoothing. All new thumb/pinch joint angles are
+**simulation candidates**, not verified human-robot pinch contacts. Validate
+fingertip spacing, self-collision and grasp pressure in PhysX and tune
+`hardware/hx5_controller_poses.json` before a physical pinch test.
 
-Y continuously interpolates from the C-shaped rest pose to `angled_grip`
-according to trigger depth. Its closed target uses the original pinch for
-thumb/index/middle; ring/little copy the middle finger's flexion angles while
-retaining their C-rest roll, so they do not turn toward the thumb.
-There is no arrival wait or preparation timeout
-for Y. Mode 2 sends computed positions at the gate rate without an extra
-output filter or velocity slew limit. Mode 1 keeps its previous slew and age checks.
+**Right-grip ready recovery requires the new robot launcher.** The PC disarms
+first and waits for an explicit fresh gate acknowledgement. The robot launcher
+then stops the old Cyclo/gate process group **before** executing the existing
+five-second arms-only `hardware.ready_pose` action and starts a new Cyclo/gate
+process group afterward. It reports `READY` only after the new gate provides
+fresh healthy disarmed feedback. A+X remains blocked during recovery, and
+failure stays disarmed; inspect session logs instead of repeatedly forcing
+motion. The original SH5 follower remains running; the recovery does not move
+lift, head, mobile base, or fingers.
+
+The lift-follow correction is shared by optical and controller input. It uses
+**measured** `lift_joint` feedback to move the two wrist targets, their
+elbow/workspace hints and calibration anchors by the same vertical displacement;
+it does not apply the command target twice or change VR orientation zero.
+In mode 2, releasing the left grip freezes XR relative motion, **not** the
+lift/body frame, so lowering lift carries the hands downward.
+
+SH5 right-stick functions are exclusive: HEAD mode controls lift with vertical
+stick travel; MOBILE mode controls base yaw with horizontal travel and ignores
+lift input. Both stick clicks toggle modes. The existing left-stick head/base
+mapping and activation checks remain in effect.
+
+The final 40 finger targets pass through the robot gate at 100Hz, capped at
+85% of each physical URDF velocity limit. Mode 1 and optical hand input retain
+the same cap. This reduces speed modestly; it does not reduce holding torque
+or prove thermal protection. HOLD retains measured positions rather than
+disabling torque. Stale controller input stops updates.
+
+
+**[INTEGRATED PR #4 — trigger rate]** Controller hand mode 2 trigger **closing** is additionally limited to 50% of the configured HX5 finger velocity setting (while retaining the previous 85% URDF cap). Trigger opening is not deliberately slowed. This is independent of the 30 Hz Dynamixel packet write cadence and does not remove the arm/hand shared BulkRead limitation.
 
 Optical `--input hands --hand-mode 1` delegates landmark-to-joint processing to
 Cyclo's installed `scripts.teleop_retargeting` without thumb overrides, filter
@@ -196,16 +219,57 @@ before/after check; it is not evidence that the remaining board-side plateau
 has been resolved. The local `xr_tele` RH5DG2 reference uses a separate hand
 command thread and state-receive thread, normally at a 20 Hz command rate;
 its input/optimizer code is not substituted for the stock SH5 retargeter.
-A first positions/extends the thumb outside while holding the other fingers.
-For A the gate waits for measured preparation
-(within 0.1rad, minimum 0.12s) before closure. Failure to reach it within 3s
-raises a gate fault and holds. For A the thumb stays outside while trigger
-scales the other four fingers. This preparation sequence remains in mode 2.
+#### SH5 controller head/mobile refinement (2026-10-28)
 
-SH5 right-stick functions are exclusive: HEAD mode controls lift with vertical
-stick travel; MOBILE mode controls base yaw with horizontal travel and ignores
-lift input. Both stick clicks toggle modes. Existing axis signs, deadzones,
-left-stick head/base controls and activation checks remain in effect.
+[CHANGED] This applies to `--input controllers` with either hand mode 1 or 2;
+it does not change optical hands, SG2 mode, arm QP or hardware follower safety.
+The **physical, live SH5 URDF** limits remain authoritative: head_joint1
+(tilt) = [-0.2317, +0.6951] rad, head_joint2 (pan) = [-0.35, +0.35] rad,
+lift = [-0.5, 0] m. Head jog now uses 0.30 rad/s independent of WebXR event
+rate (rather than 0.06 rad per input event) and clamps at the *live* URDF
+limits without creating an out-of-range command. Lift jog scale is reduced
+from 0.005 to 0.002 m per 30 Hz update (approximately 0.06 m/s).
+
+[CHANGED] In MOBILE, pressing either stick immediately commands zero and
+disarms translation. Release both sticks and keep them at their physical
+centers for at least 0.30 seconds before motion is accepted. The offset
+is learned per axis, with at most 0.22 normalized stick displacement;
+a larger resting offset blocks motion and must be resolved at the device
+or XR input calibration, not by increasing deadzone without limit. When
+motion is already at zero, very small center drift is tracked slowly.
+The `[STICK INTENT]` log prints `mobile_zero`, `mobile_ready` and
+`filter`. Left stick selects **forward/back OR left/right**, never both.
+Yaw from the right stick is also suppressed while translation is active.
+[CHANGED 2026-10-28] The MOBILE setpoint is now jerk- and
+acceleration-clamped: discrete acceleration is `(v_k - v_(k-1))/dt`,
+and its step is limited by the declared per-axis `JERK` limit.
+During braking, each component approaches zero monotonically and is
+clamped at zero rather than crossing to the opposite sign. Reversing
+direction intentionally requires the stick to pass through neutral
+**after the previous commanded velocity reaches zero**, then a new
+opposite press. This is deliberately stricter than the old 0.16-second
+reversal timer, which could allow a long stick rebound to reverse.
+Yaw and translation also cannot overlap during a mode-direction change.
+A forced stop or invalid tracking sample can bypass a smooth jerk ramp
+to publish zero immediately. Loss of a fresh controller frame or ACTIVE
+gating disarms MOBILE and commands zero.
+
+A base moving *physically* backward while `/cmd_vel.linear.x` stays
+zero is **not** joystick drift: inspect `/odom`, swerve drive/controller
+logs, drive motor velocity and their timestamps instead. The upstream
+ROBOTIS `SwerveDriveController` declares 0.1m/s linear and 0.1rad/s
+angular velocity deadbands by default. The official
+`ffw_sh5_follower_ai_hardware_controller.yaml` sets
+`enabled_speed_limits: false`, so its listed acceleration/jerk limits
+are inactive. Together these can make the downstream wheel command
+abrupt near zero even when this PC stick ramp is continuous; check
+the *live* controller parameters and actual wheel feedback before
+retuning firmware/controller limits. This PR deliberately does not change
+wheel/steering hardware parameters. Run the first physical trial in a
+clear area with lift stationary; compare raw Vuer `thumbstickValue`,
+`[STICK INTENT]`, `/cmd_vel`, and odometry. Neither URDF joint limits nor
+collision checks should be bypassed to cure a latching hardware fault;
+read `/xr_hardware/gate_status` for its reason.
 
 HX5-D20 poses in `hx5_controller_poses.json` use 20 joints per side. The G1
 7-joint preset-selection structure and mirrored-hand convention in the local
@@ -227,20 +291,21 @@ commands. That mode retains V start/HOLD/resume and the C review-key mapping.
 
 ## Recording behavior
 
-In Loop Preview, select the separate Robot State sources **aiworker**
-(source key **robotis-vr-sh5**) and **HX5-D20**
-(source key **robotis-vr-sh5-hand**). These are the two Robot State sources;
-no separate Tactile source is registered. Robot State uses robot type
-**ffw_sh5_vr**, action space **joint_position**, and finger type **HX5-D20**.
-The robot source carries arm/body data; the hand source carries hand joint
-observations, commands, raw tactile pressure, and controller metadata.
-Remove or Ignore the old combined **AI Worker VR / HX5-D20** and separate
-**robotis-vr-sh5-tactile**
-entry in saved Preview settings, then save the separate source selections.
-Updating code does not migrate saved Loop settings. If the old source is
-still live, check for an older streamer process before removing its entry.
-Select the
-camera sources exposed by the existing robot camera implementation. Start,
+In Loop Preview, select ONE Robot State source, **aiworker** (key:
+robotis-vr-sh5). This schema now contains BOTH robot and HX5-D20 hand qpos.
+The independent **HX5-D20** source (key robotis-vr-sh5-tactile) has kind
+**Tactile**, not Robot State. Retire the old robotis-vr-sh5-hand Robot State
+source and re-save the Loop cell configuration: the aiworker key is
+unchanged but its channel layout has changed.
+
+Robot State uses robot type ffw_sh5_vr, action space joint_position, and
+finger type HX5-D20. The default **training** profile selects robot and
+hand joint observations/actions plus teleop.flags and teleop.action_valid.
+On the robot command, use --loop-channels qpos|training|all or an exact
+comma-separated key list. --loop-no-tactile omits the independent tactile
+source; --loop-no-camera is separate. See hardware/LOOP_SOURCE_SPLIT.md.
+Select camera sources exposed by the existing robot camera implementation.
+Start,
 finish, save and discard the episode in Loop as usual. The wrapper never
 invokes Loop's recording start/stop/save/delete API.
 
@@ -271,15 +336,11 @@ serial connection or starts a tactile grasp controller. The official current
 SH5 follower launch includes `pressure_l_broadcaster` and
 `pressure_r_broadcaster`; older installed workspaces may not have these.
 
-Each hand's existing observation/action joint-position vectors still contain
-20 joints. The same source adds these channels beneath
-`ffw_sh5_vr.observation.left_hand` and `.right_hand`:
-
-| Suffix | Entries |
-|---|---|
-| tactile_pressure | 45 unsigned raw readings (0..255); 5 sensors x 3 x 3 |
-| tactile_status | received, valid_message, fresh, observed_receipt_hz |
-| tactile_timing | receipt age in seconds (-1=missing), ROS header stamp in seconds (-1=missing), local receipt sequence |
+Each hand's 20-joint observation/action vectors are part of **aiworker**
+Robot State. The independent **HX5-D20 Tactile** source carries two typed
+channels, left_hand and right_hand, each with up to 45 raw uint8 readings.
+No tactile_pressure, tactile_status or tactile_timing channel is declared
+on the aiworker Robot State schema.
 
 Pressure ordering is `finger_l_sensor1..5` / `finger_r_sensor1..5`, each with
 `Present Pressure 1..9` in row-major order (top to bottom, left to right).
@@ -287,19 +348,14 @@ The adapter resolves both sensor names and pressure names; array arrival order
 does not change this layout. Sensor numbers are kept verbatim rather than
 guessing their anatomical finger names. Missing/duplicate sensors, invalid
 interface names and values outside 0..255 invalidate that hand's sample.
-Malformed or older-than-0.5-second pressures are `None`, not fabricated zeros.
-Status/timing continue even when pressure is missing; `valid_message` describes
-the last message, while `fresh` additionally checks receipt age. Receipt Hz
-measures callback arrival, not the hardware sampling clock or sensor health.
+Malformed or older-than-0.5-second pressures are omitted, not
+fabricated zeros. Local status, receipt timing and validity checks remain
+in the parser, but are not automatically sent as robot state channels.
 
-The HX5-D20 hand source sends the latest raw readings on its existing 30 Hz
-recording clock, alongside joint values, including during V/HOLD. It does not
-preserve every upstream frame if the pressure publisher runs faster; header
-stamps, receipt sequence and arrival rate make reuse/downsampling visible.
-Raw pressure is not calibrated Newton force. No baseline subtraction or
-RH5DG2 force/proximity/palm conversion is applied. These are robot channels in
-the existing Preview/recording source; this change does not add a custom hand
-heatmap widget to the Loop application.
+The HX5-D20 typed Tactile source uses the same 30 Hz PC-anchored clock
+and tick sequence as aiworker. Upstream frames faster than 30 Hz are not
+all preserved. Raw pressure is not calibrated Newton force. No baseline
+subtraction or RH5DG2 force/proximity/palm conversion is applied.
 
 After deployment, with the follower already running, these commands only read
 the active controllers/topics inside `ai_worker` (source ROS/workspace first,
@@ -324,7 +380,7 @@ not by whichever order a message happens to use. A missing/incomplete group is
 `None`. Latest action values may remain present during HOLD, accompanied by
 the explicit validity/age markers below.
 
-`ffw_sh5_vr.teleop.*` contains:
+`ffw_sh5_vr.teleop.*` channels are available when selected (the default training profile keeps only flags and action_valid; qpos omits all teleop fields; all keeps every field):
 
 | Channel | Vector entries |
 |---|---|

@@ -1,4 +1,4 @@
-"""Read-only HX5-D20 pressure layout for the combined VR/Loop robot source.
+"""Read-only HX5-D20 pressure parsing for the separate typed Loop Tactile source.
 
 No ROS, serial access, baseline subtraction or hand command publishers here.
 The canonical ordering follows ROBOTIS sensor/interface names, never arrival
@@ -17,20 +17,6 @@ SENSOR_NAMES = {
 }
 PRESSURE_NAMES = tuple(f'Present Pressure {i}' for i in range(1, 10))
 
-
-def channel_layout(robot_type):
-    """ChannelInfo constructor arguments; angles remain in the existing layout."""
-    for side in HAND_SIDES:
-        group = f'{side}_hand'
-        prefix = f'{robot_type}.observation.{group}'
-        yield dict(key=prefix+'.tactile_pressure',
-                   label=f'{HAND_MODEL} {side}: sensors 1..5, each row-major 3x3; raw 0..255',
-                   unit='', group=group)
-        yield dict(key=prefix+'.tactile_status',
-                   label='received,valid_message,fresh,observed_receipt_hz', unit='', group=group)
-        yield dict(key=prefix+'.tactile_timing',
-                   label='receipt_age_s (-1=missing), ROS_header_stamp_s, receipt_sequence',
-                   unit='', group=group)
 
 
 def parse_pressures(side, message):

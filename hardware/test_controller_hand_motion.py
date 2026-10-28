@@ -25,6 +25,7 @@ class HandMotionTests(unittest.TestCase):
         measured={n:0. for names in FINGER_NAMES.values() for n in names}
         hand.limits={n:dict(lower=-1.,upper=1.,velocity=.001) for n in measured}
         hand.previous,hand.preparing,hand.native={},{},{}
+        hand.last_trigger={}
         hand.active,hand.last_output=False,0.
         hand.publish=Mock()
         hand.node=SimpleNamespace(measured_rx=10.,intent_enabled=True,fault=None,latch=Mock())
@@ -57,21 +58,42 @@ class HandMotionTests(unittest.TestCase):
             hand.tick({},1.,True)
         hand.publish.assert_not_called()
 
-    def test_mode2_direct_targets_ignore_slew_and_hand_age_but_obey_global_hold(self):
+    def test_mode2_trigger_closing_half_velocity_release_and_pinch_unchanged(self):
+        # [CHANGED 2026-10-28] Only trigger CLOSING is rate-limited.
         hand=SH5HandOutput.__new__(SH5HandOutput)
         hand.mode,hand.hand_mode,hand.poses='controllers',2,POSES
         measured={n:0. for names in FINGER_NAMES.values() for n in names}
-        hand.limits={n:dict(lower=-4.,upper=4.,velocity=.001) for n in measured}
-        hand.previous,hand.preparing={},{}
+        hand.limits={n:dict(lower=-4.,upper=4.,velocity=2.) for n in measured}
+        hand.previous,hand.preparing,hand.last_trigger={},{},{}
         hand.active,hand.last_output=False,0.
-        hand.node=SimpleNamespace(measured_rx=10.)
+        hand.node=SimpleNamespace(measured_rx=10.3)
         hand.publish=Mock()
-        hand.controls=controls('full_grip',trigger=.8)
-        hand.rx=0.
+        hand.controls=controls('full_grip',trigger=1.)
+        hand.rx=0.  # Mode 2 does not add a separate .3s hand timeout.
         hand.tick(measured,10.,True)
+        target=targets(POSES,hand.controls)
+        first=dict(hand.publish.call_args.args[0])
+        for name,goal in target.items():
+            self.assertAlmostEqual(first[name],max(-.01,min(.01,goal)))
+
+        hand.tick(measured,10.1,True)
+        second=dict(hand.publish.call_args.args[0])
+        for name in measured:
+            self.assertLessEqual(abs(second[name]-first[name]),.1000001)
+            if abs(target[name])>.11:
+                self.assertNotAlmostEqual(second[name],target[name])
+
+        # Releasing the trigger is NOT deliberately slowed.
+        hand.controls=controls('full_grip',trigger=.25)
+        hand.tick(measured,10.2,True)
         self.assertEqual(hand.publish.call_args.args[0],targets(POSES,hand.controls))
-        hand.tick(measured,10.,False)
+        # Grip-pinch remains directly proportional and bypasses the trigger limit.
+        hand.controls=controls('full_grip',trigger=.25,grip=.4)
+        hand.tick(measured,10.3,True)
+        self.assertEqual(hand.publish.call_args.args[0],targets(POSES,hand.controls))
+        hand.tick(measured,10.4,False)
         self.assertFalse(hand.active)
+        self.assertFalse(hand.last_trigger)
         self.assertEqual(hand.publish.call_args.args[0],measured)
 
     def test_mode1_keeps_existing_velocity_limit_and_hand_timeout(self):
@@ -80,6 +102,7 @@ class HandMotionTests(unittest.TestCase):
         measured={n:0. for names in FINGER_NAMES.values() for n in names}
         hand.limits={n:dict(lower=-4.,upper=4.,velocity=.1) for n in measured}
         hand.previous,hand.preparing={},{}
+        hand.last_trigger={}
         hand.active,hand.last_output=False,0.
         hand.node=SimpleNamespace(measured_rx=1.)
         hand.publish=Mock()
@@ -99,24 +122,24 @@ class HandMotionTests(unittest.TestCase):
                 for last in pair:
                     with self.subTest(pair=pair,first=first,last=last):
                         modes=ControllerHandModes()
-                        modes.selected='point'
+                        modes.selected='ulnar_pinch'
                         for i,pressed in enumerate((first,pair,last,'','','')):
                             states={'left':{},'right':{}}
                             for key in pressed:
                                 side,name=keys[key]
                                 states[side][name]=True
                             self.assertIsNone(modes.buttons(states['left'],states['right'],now=i*.1))
-                        self.assertEqual(modes.selected,'point')
+                        self.assertEqual(modes.selected,'ulnar_pinch')
 
     def test_nonoverlapping_chord_events_cancel_pending_tap(self):
         modes=ControllerHandModes()
-        modes.selected='point'
+        modes.selected='ulnar_pinch'
         modes.buttons({'aButton':True},{},now=0.)
         modes.buttons({},{},now=.01)  # transient all-up before opposite event
         modes.buttons({},{'aButton':True},now=.08)
         modes.buttons({},{},now=.1)
         self.assertIsNone(modes.buttons({},{},now=.4))
-        self.assertEqual(modes.selected,'point')
+        self.assertEqual(modes.selected,'ulnar_pinch')
 
     def test_single_tap_waits_for_quiet_interval_and_reset_cancels(self):
         modes=ControllerHandModes()
@@ -138,6 +161,44 @@ class HandMotionTests(unittest.TestCase):
         modes.buttons({},{},now=.14)
         self.assertIsNone(modes.buttons({},{},now=.5))
         self.assertEqual(modes.selected,'full_grip')
+
+    def test_A_B_select_expected_distinct_tripod_and_ulnar_pinches(self):
+        for button,expected in (('A','tripod_deep'),('B','ulnar_pinch')):
+            modes=ControllerHandModes()
+            left,right=({}, {'aButton':True} if button=='A' else {'bButton':True})
+            modes.buttons(left,right,now=0.)
+            modes.buttons({},{},now=.01)
+            self.assertEqual(modes.buttons({},{},now=.20),(button,expected))
+            self.assertEqual(modes.selected,expected)
+            commanded=targets(POSES,controls(pose=expected,trigger=1.,grip=0.))
+            for side,names in FINGER_NAMES.items():
+                for joint,goal in zip(names,POSES[side][expected]):
+                    self.assertAlmostEqual(commanded[joint],goal)
+
+    def test_deep_thumb_exceeds_old_angled_and_ulnar_fingers_are_independent(self):
+        for side,poses in POSES.items():
+            # [CHANGED] Thumb joint-3 and joint-4 close more than former Y.
+            for i in (2,3):
+                self.assertGreater(abs(poses['tripod_deep'][i]),abs(poses['angled_grip'][i]))
+                self.assertGreater(abs(poses['ulnar_pinch'][i]),abs(poses['angled_grip'][i]))
+            # Index and middle are open for B; ring and little are open for A.
+            self.assertEqual(poses['ulnar_pinch'][4:12],poses['open'][4:12])
+            self.assertEqual(poses['tripod_deep'][12:20],poses['open'][12:20])
+            self.assertNotEqual(poses['ulnar_pinch'][13:16],poses['open'][13:16])
+            self.assertNotEqual(poses['ulnar_pinch'][17:20],poses['open'][17:20])
+
+    def test_mode2_grip_does_not_override_selected_trigger_pose(self):
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.hand_mode=2
+        hand.controls=None
+        payload=controls(pose='ulnar_pinch',trigger=.7,grip=1.)
+        hand.receive(payload,now=1.)
+        self.assertEqual(hand.controls['left']['grip'],0.)
+        self.assertEqual(hand.controls['right']['grip'],0.)
+        selected=targets(POSES,hand.controls)
+        for side,names in FINGER_NAMES.items():
+            self.assertAlmostEqual(selected[names[13]],.7*POSES[side]['ulnar_pinch'][13]
+                                   +.3*POSES[side]['open'][13])
 
     def test_c_shape_at_rest_and_proportional_close(self):
         for depth in (0., .01, .25, .5, 1.):

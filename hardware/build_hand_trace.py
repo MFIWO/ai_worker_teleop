@@ -1,6 +1,7 @@
-"""Build optional timing-only overlay atop the existing 30Hz hand driver.
+"""Build optional timing trace atop the 30Hz hand driver with bounded RX waits.
 
-No ROS nodes, serial ports, motor goals or setting writes. Selection is explicit.
+[CHANGED 2026-10-28] Includes the same read timeout bound as normal follower.
+Tracing observes the original transport without adding packets or write routes.
 """
 import argparse
 import hashlib
@@ -11,7 +12,7 @@ import shutil
 import subprocess
 from hardware import build_hand_write_rate as base
 
-ROOT=Path('/workspace/ai_worker_xr_hand_trace')
+ROOT=Path('/workspace/ai_worker_xr_hand_trace_bounded_v1')  # [CHANGED] Preserve original diagnostic build.
 PACKAGE=base.PACKAGE
 HARDWARE=Path('src/dynamixel_hardware_interface.cpp')
 INCLUDE=Path('include/dynamixel_hardware_interface/dynamixel')
@@ -83,6 +84,7 @@ def patch_source(text):
 
 
 def patch_hardware(text):
+    text=base.patch_hardware(text)  # [CHANGED] Same bounded-RX driver as ordinary use.
     text='#include "dynamixel_hardware_interface/dynamixel/hx5_stage_trace.hpp"\n'+text
     # Hardware identity distinguishes follower, base and sensor warnings.
     anchor='''  std::vector<uint8_t> reboot_dxl;'''
@@ -128,7 +130,8 @@ def expected(source):
 def verify(root=ROOT,source=base.SOURCE):
     root,source=Path(root),Path(source)
     manifest=json.loads((root/'trace_manifest.json').read_text())
-    if manifest.get('purpose')!='hx5_stage_timing_only_v1':raise ValueError('Unknown trace build')
+    if (manifest.get('purpose')!='hx5_stage_timing_bounded_v1' or
+            manifest.get('read_timeout_cap_ms')!=base.READ_CAP_MS):raise ValueError('Unknown trace build')
     if base.source_hashes(source)!=manifest['original_source_sha256']:raise ValueError('Original driver changed')
     for name,text in expected(source).items():
         digest=hashlib.sha256(text.encode()).hexdigest()
@@ -148,6 +151,7 @@ def follower_environment(trace_dir,root=ROOT,base_env=None):
     for name,path in [('AMENT_PREFIX_PATH',prefix),('CMAKE_PREFIX_PATH',prefix),('LD_LIBRARY_PATH',prefix+'/lib')]:
         env[name]=path+(':'+env[name] if env.get(name) else '')
     env['AI_WORKER_HX5_WRITE_HZ']='30'
+    env[base.ENV_READ_CAP]=str(base.READ_CAP_MS)  # [CHANGED] Match production timing cap.
     env[ENV]=str(dest)
     return env
 
@@ -160,7 +164,9 @@ def verify_running_follower(root=ROOT):
             args=(p/'cmdline').read_bytes().split(b'\0')
             if not args or Path(args[0].decode()).name!='ros2_control_node':continue
             env=(p/'environ').read_bytes().split(b'\0');maps=(p/'maps').read_text()
-            found.append(any(s.startswith(ENV.encode()+b'=') for s in env) and str(base.library(Path(root))) in maps)
+            found.append(any(s.startswith(ENV.encode()+b'=') for s in env) and
+                         (base.ENV_READ_CAP+'='+str(base.READ_CAP_MS)).encode() in env and
+                         str(base.library(Path(root))) in maps)
         except (OSError,UnicodeError):continue
     if found!=[True]:raise RuntimeError('Restart robot session with --hand-trace --bringup; existing follower is not the timing build')
 
@@ -180,10 +186,11 @@ def build(source=base.SOURCE,root=ROOT):
                     '--cmake-args','-DCMAKE_BUILD_TYPE=Release','-DBUILD_TESTING=OFF'],cwd=root,
                    env={**os.environ,'CMAKE_BUILD_PARALLEL_LEVEL':'1'},check=True,timeout=900)
     if base.source_hashes(source)!=original:raise RuntimeError('Original driver changed during build')
-    manifest={'purpose':'hx5_stage_timing_only_v1','original_source_sha256':original,
+    manifest={'purpose':'hx5_stage_timing_bounded_v1','original_source_sha256':original,
+              'read_timeout_cap_ms':base.READ_CAP_MS,
               'patched_sha256':{name:base.sha(dest/name) for name in patched},
               'library_sha256':base.sha(base.library(root)),'motor_commands_sent':False,
-              'control_behavior_changed':False,'hand_write_hz':30.}
+              'control_behavior_changed':True,'hand_write_hz':30.}
     (root/'trace_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');verify(root,source)
     print('[HAND TRACE BUILD] Timing-only overlay ready; no robot started')
 

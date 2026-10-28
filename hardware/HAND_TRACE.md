@@ -1,10 +1,17 @@
 # HX5 driver timing capture
 
 This optional diagnostic keeps mode 1/2, the existing 30Hz hand write cadence,
-arm control, packet selection, motor goals, profiles and SDK settings. It wraps
+arm control, packet selection, motor goals, profiles and SDK settings.
+[CHANGED 2026-10-28] It additionally uses the same bounded 60ms group-read
+wait as ordinary follower operation, rather than measuring the older
+unbounded-wait build. The read timeout cap is not a per-ID read isolation. It wraps
 SDK readPort/writePort calls and observes driver values; it never introduces a
 serial read/write or retry. It must be selected before starting the follower.
-The default robot command continues using its previous driver.
+The default robot command uses the matching non-tracing bounded-read driver.
+The versioned trace overlay must be rebuilt with
+`python3 -m hardware.build_hand_trace` before `--hand-trace`. Old captured
+traces remain valid as historical evidence; compare their build manifests
+before combining timings.
 
 ## Operator commands (all from PC host terminals)
 

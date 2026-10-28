@@ -35,6 +35,9 @@ def parser():
     p.add_argument('--bringup',action='store_true',help='robot: start missing router/follower without native initialization; raise only arms over five seconds')
     p.add_argument('--ready-pose',action='store_true',help='robot: five-second arms-only ready motion before VR starts')
     p.add_argument('--loop-no-camera',action='store_true')
+    # CHANGED(2026-10-28): Robot-side Loop recorder selection, not motion control.
+    p.add_argument('--loop-channels',default='training',help='training | qpos | all | comma-separated channel keys')
+    p.add_argument('--loop-no-tactile',action='store_true',help='robot: omit separate HX5-D20 Tactile source')
     p.add_argument('--hand-trace',action='store_true',help='robot: select the timing-only hand driver; recording starts separately')
     p.add_argument('--dry-run',action='store_true')
     return p
@@ -54,6 +57,9 @@ def command(args,interactive):
     if args.bringup:inner.append('--bringup')
     if args.ready_pose:inner.append('--ready-pose')
     if args.loop_no_camera:inner.append('--loop-no-camera')
+    if args.loop=='vr':
+        inner.extend(['--loop-channels',args.loop_channels])
+        if args.loop_no_tactile:inner.append('--loop-no-tactile')
     if getattr(args,'hand_trace',False):inner.append('--hand-trace')
     return ['ssh','-T','-o','ServerAliveInterval=2','-o','ServerAliveCountMax=2',f'robotis@{args.robot_ip}',shlex.join(inner)]
 
@@ -61,8 +67,10 @@ def command(args,interactive):
 def main():
     p=parser()
     args=p.parse_args()
-    if args.side=='pc' and (args.bringup or args.loop_no_camera or args.ready_pose or args.hand_trace):
-        p.error('--bringup, --ready-pose, --loop-no-camera and --hand-trace apply to the robot command')
+    if args.side=='pc' and (args.bringup or args.loop_no_camera or args.ready_pose or args.hand_trace or
+                            args.loop_no_tactile or args.loop_channels!='training'):
+        p.error('--bringup, --ready-pose, --loop-no-camera, --loop-no-tactile, '
+                '--loop-channels and --hand-trace apply to the robot command')
     cmd=command(args,sys.stdin.isatty())
     if args.dry_run:
         print(shlex.join(cmd))
