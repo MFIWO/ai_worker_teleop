@@ -31,6 +31,8 @@ def head_targets(stick, previous, measured, limits, elapsed, speed=0.30):
         raise ValueError('expected two head axes and two measured positions')
     targets = []
     for index, name in enumerate(names):
+        if name not in limits:
+            raise ValueError(f'{name}: live URDF limit unavailable')
         bound = limits[name]
         lower, upper, velocity = (float(bound[k]) for k in ('lower', 'upper', 'velocity'))
         base = float(measured[index] if previous is None else previous[index])
