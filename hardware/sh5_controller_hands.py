@@ -10,6 +10,7 @@ HAND_TOPICS = {side: f'/leader/joint_trajectory_command_broadcaster_{side}_hand/
                for side in FINGER_NAMES}
 NATIVE_TOPICS = {side:f'/xr_hardware/sh5/native_{side}_hand' for side in FINGER_NAMES}
 HAND_SPEED_SCALE = .85
+MODE1_FINGER_SPEED_SCALE = .25  # Pace both trigger/grip closure and release like mode 2.
 # [CHANGED 2026-10-28] Controller mode 2 trigger CLOSING only: one quarter of the configured
 # finger velocity. Optical modes, grip-pinch and opening are unaffected.
 MODE2_TRIGGER_CLOSE_SPEED_SCALE = .25
@@ -152,7 +153,7 @@ class SH5HandOutput:
             'continuous joint travel, bounded opening; global HOLD/fault retained.'
             if self.mode=='controllers' and self.hand_mode==2 else
             'Direct position relay; no added smoothing, slew or hand-age gate. Global HOLD/fault remains.'
-            if self.direct_output else 'Mode 1: original hand velocity limits and input watchdog.'))
+            if self.direct_output else 'Controller mode 1: trigger/grip closure and opening <= 25% of configured finger velocity; input watchdog retained.'))
 
     def receive(self,payload,now):
         self.controls = None if payload is None else control_values(payload)
@@ -277,8 +278,11 @@ class SH5HandOutput:
             raise ValueError('controller hands require all 40 fresh measured finger joints')
         if self.mode=='controllers' and self.hand_mode==2:
             desired=self.prepare_targets(desired,measured,now)
+        paced_limits = ({name:dict(bound,velocity=bound['velocity']*MODE1_FINGER_SPEED_SCALE)
+                         for name,bound in self.limits.items()}
+                        if self.hand_mode==1 else self.limits)
         output = (desired if self.direct_output else
-                  slew_aux(desired,self.previous,measured,self.limits,
+                  slew_aux(desired,self.previous,measured,paced_limits,
                            now-self.last_output if self.active else .01))
         if self.mode=='controllers' and self.hand_mode==2:
             # Bound every trigger output transition, including thumb prep and

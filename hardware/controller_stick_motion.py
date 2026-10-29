@@ -51,7 +51,7 @@ def head_targets(stick, previous, measured, limits, elapsed, speed=0.30):
 
 
 class MobileStickFilter:
-    """Neutral recenter + exclusive translation + bounded acceleration/reversal.
+    """Neutral recenter + exclusive translation + bounded acceleration.
 
     Input is the *already mapped* legacy SG2 stick convention:
     left=[forward_axis, side_axis], right=[unused_lift_axis, yaw_axis].
@@ -66,7 +66,6 @@ class MobileStickFilter:
     DECEL = (1.10, 1.10, 1.7)
     # [CHANGED 2026-10-28] Clamp d(v)/dt and d²(v)/dt² (accel/jerk).
     JERK = (12.0, 12.0, 18.0)
-    # A reverse direction requires an observed neutral, not just a timer.
     STOP_EPS = 1e-5
 
     def __init__(self):
@@ -82,7 +81,6 @@ class MobileStickFilter:
         self._idle_since = None
         self._last_time = None
         self._axis_lock = None
-        self._direction = [0, 0, 0]
         self._acceleration = [0.0, 0.0, 0.0]
         self.output = (0.0, 0.0, 0.0)
 
@@ -152,20 +150,6 @@ class MobileStickFilter:
         next_output = []
         for index, target in enumerate(desired):
             prior = self.output[index]
-            sign = (1 if target > 0 else -1) if abs(target) > 1e-12 else 0
-
-            if sign == 0:
-                # Neutral releases the direction latch *after* braking to zero.
-                if abs(prior) < self.STOP_EPS:
-                    self._direction[index] = 0
-            elif self._direction[index] == 0:
-                self._direction[index] = sign
-            elif sign != self._direction[index]:
-                # [CHANGED 2026-10-28] Do not authorize a sign reversal just
-                # because a negative joystick rebound lasted 160ms. Brake to
-                # zero and require an actual neutral sample before reversing.
-                target = 0.0
-
             if dt <= 0.0:
                 next_output.append(prior)
                 continue

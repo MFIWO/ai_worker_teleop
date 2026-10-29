@@ -1,7 +1,7 @@
 """Choose the channels declared on the *single* aiworker Robot State source.
 
-The typed tactile source is also mirrored as numeric pressure observations
-for the joint/pressure Parquet export. No ROS, SDK, network or hardware here.
+Pressure belongs exclusively to the HX5-D20 Tactile source.
+No ROS, SDK, network or hardware here.
 """
 
 # CHANGED(2026-10-28): Single-source, schema-level training channel selection.
@@ -11,7 +11,7 @@ PRESETS = ("training", "qpos", "all")
 def select_robot_channels(channel_infos, robot_type, selection="training"):
     """Return declared full channel keys in mapper order, or fail before connect.
 
-    training: joint positions, numeric pressure/status and validity masks.
+    training: joint positions and validity masks.
     qpos: only measured joint positions (including all configured hands).
     all: every robot channel, including optional diagnostics.
     custom: comma-separated exact keys, with or without '<robot_type>.' prefix.
@@ -26,6 +26,8 @@ def select_robot_channels(channel_infos, robot_type, selection="training"):
         if not full.startswith(prefix):
             raise ValueError(f"unexpected robot channel outside {robot_type}: {full}")
         relative = full[len(prefix):]
+        if relative.endswith((".tactile_pressure", ".tactile_status", ".tactile_timing")):
+            continue
         if relative in declared:
             raise ValueError(f"duplicate Loop robot channel: {full}")
         declared[relative] = full
@@ -34,7 +36,6 @@ def select_robot_channels(channel_infos, robot_type, selection="training"):
         chosen = {key for key in declared if (
             key.endswith(".joint_position") and
             (key.startswith("observation.") or key.startswith("action."))
-            or key.endswith(('.tactile_pressure', '.tactile_status'))
             or key in ("teleop.flags", "teleop.action_valid", "teleop.observation_valid")
         )}
     elif selection == "qpos":

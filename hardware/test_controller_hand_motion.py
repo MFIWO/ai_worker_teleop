@@ -101,7 +101,7 @@ class HandMotionTests(unittest.TestCase):
         hand.tick(measured,10.5,False)
         self.assertEqual(hand.publish.call_args.args[0],held)
 
-    def test_mode1_keeps_existing_velocity_limit_and_hand_timeout(self):
+    def test_mode1_paces_trigger_and_grip_close_and_release_with_hand_timeout(self):
         hand=SH5HandOutput.__new__(SH5HandOutput)
         hand.mode,hand.hand_mode,hand.poses='controllers',1,POSES
         measured={n:0. for names in FINGER_NAMES.values() for n in names}
@@ -113,8 +113,27 @@ class HandMotionTests(unittest.TestCase):
         hand.publish=Mock()
         hand.controls={s:dict(trigger=1.,grip=0.) for s in FINGER_NAMES}
         hand.rx=1.
-        hand.tick(measured,1.,True)
-        self.assertTrue(all(abs(v)<=.00100001 for v in hand.publish.call_args.args[0].values()))
+        for key in ('trigger','grip'):
+            with self.subTest(key=key):
+                hand.previous={}
+                hand.active=False
+                hand.controls={side:dict(trigger=float(key=='trigger'),grip=float(key=='grip'))
+                               for side in FINGER_NAMES}
+                hand.tick(measured,1.,True)
+                first=hand.publish.call_args.args[0].copy()
+                self.assertTrue(any(abs(v)>0. for v in first.values()))
+                self.assertTrue(all(abs(v)<=.000250001 for v in first.values()))
+                # Begin opening from the fully closed command. A physical
+                # trigger/grip springing to zero cannot jump to the open pose.
+                closed=targets(POSES,hand.controls)
+                hand.previous=closed.copy()
+                hand.last_output=1.
+                hand.active=True
+                hand.controls={side:dict(trigger=0.,grip=0.) for side in FINGER_NAMES}
+                hand.tick(measured,1.01,True)
+                opening=hand.publish.call_args.args[0]
+                self.assertTrue(all(abs(opening[n]-closed[n])<=.000250001 for n in measured))
+                self.assertNotEqual(opening,targets(POSES,hand.controls))
         hand.tick(measured,1.4,True)
         self.assertFalse(hand.active)
 

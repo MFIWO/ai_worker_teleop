@@ -95,8 +95,7 @@ class LoopRuntimeTests(unittest.TestCase):
         declared={c.key for c in schemas[0].robot.channels}
         self.assertIn('ffw_sh5_vr.observation.left_hand.joint_position',declared)
         self.assertIn('ffw_sh5_vr.observation.left_arm.joint_position',declared)
-        self.assertIn('ffw_sh5_vr.observation.right_hand.tactile_pressure',declared)
-        self.assertIn('ffw_sh5_vr.observation.left_hand.tactile_status',declared)
+        self.assertFalse(any('.tactile_' in key for key in declared))
         self.assertGreater(len(frames),50)
         prefix='ffw_sh5_vr.'
         active=[f for f in frames if f[2][prefix+'teleop.flags'][0]]
@@ -120,7 +119,7 @@ class LoopRuntimeTests(unittest.TestCase):
         widths={key:len(value) for key,value in frames[0][2].items()}
         self.assertTrue(all({k:len(v) for k,v in frame[2].items()}==widths for frame in frames))
         self.assertEqual(frames[0][2][prefix+'action.lift.joint_position'],[.1])
-        self.assertTrue(any(f[2][prefix+'observation.right_hand.tactile_pressure']==list(range(9))*5 for f in held))
+        self.assertTrue(all(not any('.tactile_' in key for key in f[2]) for f in frames))
 
 
 if __name__=='__main__':unittest.main()

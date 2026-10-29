@@ -53,13 +53,6 @@ def main():
                     ('clock', 'pc_anchor_age,robot_minus_pc_wallclock', 's'),
                     ('controller_inputs', 'left_trigger,left_grip,right_trigger,right_grip', 'normalized'),
                     ('hand_pose_state', 'hand_mode,pending_pose,left_pose,right_pose (see VR_LOOP.md)', 'enum'))]
-            if not args.no_tactile:
-                for side in PRESSURE_TOPICS:
-                    for name, label, unit in (
-                            ('tactile_pressure', 'thumb,index,middle,ring,little; nine raw counts (0..255) each', ''),
-                            ('tactile_status', 'received,valid,fresh,hz', '')):
-                        infos.append(ChannelInfo(key=f'{self.robot_type}.observation.{side}_hand.{name}',
-                                                 label=label, unit=unit, group='observation.' + side + '_hand'))
             return infos
 
     class VRNode(LoopStreamerNode):
@@ -246,7 +239,7 @@ def main():
             anchor_age=(-1. if self.recording_clock.last_receipt is None else now-self.recording_clock.last_receipt)
             skew=(-1. if self.recording_clock.anchor is None else time.time()-self.recording_clock.anchor-now)
             payload[f'{self.robot_type}.teleop.clock']=[anchor_age,skew]
-            # Typed tactile remains raw/nullable; numeric Parquet columns stay fixed.
+            # Pressure stays in the dedicated HX5-D20 source; robot columns stay fixed.
             self.robot_streamer.send(recording_payload(payload,self.robot_type,status), tactile_payload=payload)
             self._tick_count+=1
 

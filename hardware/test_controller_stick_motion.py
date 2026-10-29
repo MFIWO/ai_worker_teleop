@@ -108,32 +108,32 @@ class MobileTests(unittest.TestCase):
             self.assertFalse(abs(cmd[0]) > 1e-7 and abs(cmd[1]) > 1e-7)
         self.assertGreater(cmd[1], 0.)
 
-    def test_long_overshoot_never_reverses_without_neutral(self):
-        """[ADDED] Persistent release rebound must brake to 0, not back up."""
-        self.calibrate()
-        f = self.filter
-        for index in range(25):
-            f.update((-.95, -.09), self.neutral_right, now=.4 + .03 * index)
-        self.assertGreater(f.output[0], 0.)
-        outputs = []
-        for index in range(39):
-            # A negative input for >0.16s is not authorization to reverse.
-            cmd = f.update((.95, -.09), self.neutral_right,
-                           now=1.15 + .03 * index)
-            outputs.append(cmd[0])
-        self.assertTrue(all(v >= 0. for v in outputs))
-        self.assertTrue(all(old >= new for old, new in zip(outputs, outputs[1:])))
-        self.assertEqual(outputs[-1], 0.)
-        self.assertEqual(f.output[1:], (0., 0.))
-
-        # Operator releases both sticks, then deliberately presses reverse.
-        f.update(self.neutral_left, self.neutral_right, now=2.35)
-        self.assertEqual(f._direction[0], 0)
-        for index in range(12):
-            cmd = f.update((.95, -.09), self.neutral_right,
-                           now=2.38 + .03 * index)
-        self.assertLess(cmd[0], -.05)
-        self.assertEqual(cmd[1:], (0., 0.))
+    def test_each_mobile_axis_reverses_without_neutral_in_both_directions(self):
+        # Both controller hand modes share this filter. A held opposite input
+        # must cross zero and move in reverse without an extra neutral sample.
+        for axis in range(3):
+            with self.subTest(axis=axis):
+                self.setUp()
+                self.calibrate()
+                f = self.filter
+                def sample(direction):
+                    left, right = list(self.neutral_left), list(self.neutral_right)
+                    if axis == 0: left[0] = -.9 * direction
+                    elif axis == 1: left[1] = .9 * direction
+                    else: right[1] = -.9 * direction
+                    return left, right
+                now = .4
+                for direction in (1, -1, 1):
+                    outputs = []
+                    for _ in range(45):
+                        outputs.append(f.update(*sample(direction), now=now))
+                        now += .03
+                    self.assertGreater(direction * outputs[-1][axis], .05)
+                    for output in outputs:
+                        self.assertTrue(all(value == 0. for index, value in enumerate(output)
+                                            if index != axis))
+                        self.assertLessEqual(abs(output[axis]), f.SPEED[axis])
+                    self.assertTrue(f.ready)
 
     def test_jerk_limited_acceleration_and_release_no_sign_crossing(self):
         """[ADDED] d(speed)/dt changes smoothly in acceleration, release only brakes."""

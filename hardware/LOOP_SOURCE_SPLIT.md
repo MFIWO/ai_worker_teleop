@@ -14,7 +14,7 @@ commands. The GitHub change does not update running PC/robot containers.
 There is exactly ONE Robot State source. Do not select the retired
 robotis-vr-sh5-hand Robot State source. The tactile source uses
 SourceSchema(tactile=TactileStreamSchema(...)) with send_tactile(),
-and also mirrors pressure into numeric Robot State channels for Parquet export.
+with pressure exclusive to this source; aiworker has no tactile channels.
 The robotis-vr-sh5 source key is unchanged but its layout changes:
 re-select and re-save the Loop cell configuration. Neither sender can
 automatically migrate a saved Loop configuration.
@@ -32,14 +32,13 @@ This is an SDK schema allowlist, not a post-recording dataset filter:
 
 - training (default): observation + action joint positions for left_arm (7),
   right_arm (7), left_hand (20), right_hand (20), head (2), lift (1),
-  both hands' tactile_pressure (45 each) and tactile_status (4 each),
   and teleop.flags, teleop.action_valid and teleop.observation_valid.
-  19 channels total with tactile enabled; 15 with --loop-no-tactile.
+  15 channels total; HX5-D20 is selected separately as Tactile.
   Mobile velocity and all other diagnostics are excluded.
 - qpos: six observation joint_position channels for arms, hands, head and lift,
   without actions/teleop/velocity.
 - all: all mapped joint obs/action channels, mobile velocity, teleop metadata
-  and numeric pressure/status. Typed Tactile remains available separately.
+  without pressure/status. Typed Tactile remains available separately.
 - Custom: an exact comma-separated list of keys, either with or without
   the ffw_sh5_vr. prefix. Unknown/duplicate/empty keys fail at startup.
   Example: observation.left_arm.joint_position,observation.left_hand.joint_position,teleop.flags
@@ -62,10 +61,10 @@ frames from training. Every numeric channel remains present from the first
 tick, preventing the observed late lift-action `parquet columns changed` error.
 teleop.flags is [active,paused,manual_active,fault,status_fresh].
 The observation_valid mask has the same seven-group order. If you choose only
-raw qpos, you intentionally lose the validity mask and numeric pressure.
+raw qpos, you intentionally lose the validity mask.
 
 --loop-no-tactile disables registration and subscriptions for the separate
-Tactile source and numeric pressure mirror, but keeps hand qpos inside aiworker. --loop-no-camera is
+Tactile source, but keeps hand qpos inside aiworker. --loop-no-camera is
 independent. Neither changes motor control, follower setup or ROS feedback.
 
 ## Commands on PC host (replace PC_IP and ROBOT_IP)

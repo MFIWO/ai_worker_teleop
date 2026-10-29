@@ -98,18 +98,19 @@ class LoopSourceTests(unittest.TestCase):
     def test_schema_selection_training_qpos_all_and_custom(self):
         infos = layout()
         training = select_robot_channels(infos, 'ffw_sh5_vr')
-        self.assertEqual(len(training), 19)  # 6 obs + 6 action + 3 masks + 4 pressure fields
+        self.assertEqual(len(training), 15)  # 6 obs + 6 action + 3 masks
         self.assertIn(PREFIX + 'observation.left_hand.joint_position', training)
         self.assertIn(PREFIX + 'action.right_hand.joint_position', training)
         self.assertIn(PREFIX + 'teleop.action_valid', training)
         self.assertNotIn(PREFIX + 'observation.mobile.velocity', training)
-        self.assertIn(PREFIX + 'observation.right_hand.tactile_pressure', training)
+        self.assertNotIn(PREFIX + 'observation.right_hand.tactile_pressure', training)
         observed = select_robot_channels(infos, 'ffw_sh5_vr', 'qpos')
         self.assertEqual(len(observed), 6)
         self.assertTrue(all('.observation.' in key and key.endswith('.joint_position')
                             for key in observed))
         all_channels = select_robot_channels(infos, 'ffw_sh5_vr', 'all')
-        self.assertEqual(len(all_channels), 27)
+        self.assertEqual(len(all_channels), 23)
+        self.assertFalse(any(".tactile_" in key for key in all_channels))
         selected = select_robot_channels(infos, 'ffw_sh5_vr',
             'observation.left_hand.joint_position,ffw_sh5_vr.action.right_arm.joint_position')
         self.assertEqual(selected, (
@@ -145,7 +146,7 @@ class LoopSourceTests(unittest.TestCase):
                 declared = {c.key for c in robot_schema.robot.channels}
                 self.assertIn(PREFIX + 'observation.left_arm.joint_position', declared)
                 self.assertIn(PREFIX + 'observation.left_hand.joint_position', declared)
-                self.assertIn(PREFIX + 'observation.left_hand.tactile_pressure', declared)
+                self.assertFalse(any('.tactile_' in key for key in declared))
                 payload = {
                     PREFIX + 'observation.left_arm.joint_position': [1.]*7,
                     PREFIX + 'observation.left_hand.joint_position': [2.]*20,

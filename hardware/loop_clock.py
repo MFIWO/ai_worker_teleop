@@ -33,7 +33,7 @@ class PCRecordingClock:
 
 
 class ClockedRobotStreamer:
-    """One aiworker SDK Robot State with robot/hand joints and numeric pressure."""
+    """One aiworker SDK Robot State with robot/hand joints and validity flags."""
     def __init__(self, loop_addr, mapper, clock, *, selected_channels=None):
         self.loop_addr, self.mapper, self.clock = loop_addr, mapper, clock
         self.producer = None

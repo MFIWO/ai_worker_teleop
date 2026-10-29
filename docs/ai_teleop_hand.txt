@@ -1,10 +1,10 @@
 # AI Worker SH5 teleop — 배포·빌드·실행 안내 (2026-10-29)
 # 명령 모음입니다. 파일 전체를 bash로 실행하지 말고 필요한 구간만 실행하세요.
 # PC 호스트에서 실행합니다. 각 터미널에서 아래 환경변수를 먼저 설정하세요.
-export PC_IP=192.0.2.10
-export ROBOT_IP=192.0.2.20
+export PC_IP=192.168.6.58
+export ROBOT_IP=192.168.6.50
 export TELEOP_REPO="$HOME/Downloads/external_repos/ai_worker_teleop_deploy"
-# PC_IP/ROBOT_IP는 문서용 예시입니다. 실제 주소로 바꾸세요.
+# 다른 PC에서는 PC_IP를 해당 PC 주소로 바꾸세요. ROBOT_IP도 실제 로봇 주소를 확인하세요.
 
 # ============================================================
 # 1. 다른 PC 최초 설치
@@ -32,14 +32,24 @@ cp docs/ai_teleop_hand.txt ~/Desktop/ai_teleop_hand.txt
 # 먼저 PC/robot 양쪽 teleop를 Ctrl+C로 종료하고 robot 정리 완료까지 기다립니다.
 # [HAND TORQUE OFF] Verified 40/40 finger motors 확인.
 cd "$TELEOP_REPO"
+# 기존 수정·새 파일을 보관합니다. stash는 업데이트 후 자동 복원하지 않습니다.
+git stash push -u -m "before updating main"
 git switch main
 git pull --ff-only origin main
+# 두 해시가 같아야 원격 main 반영 완료. 오류가 나면 다음 단계로 넘어가지 마세요.
+git rev-parse HEAD origin/main
+git status --short
 # 로컬 수정 때문에 pull이 거절되면 git status로 확인. 자동 reset 하지 마세요.
 bash hardware/install_pc.sh
 # PC Python 소스는 bind mount 또는 install_pc.sh로 반영됩니다.
 # docker/Dockerfile/requirements가 변경된 경우에만 이미지 build/start를 다시 실행합니다.
+mkdir -p ~/Desktop
 cp docs/ai_teleop_hand.txt ~/Desktop/ai_teleop_hand.txt
 git rev-parse HEAD
+# 기존 PC도 반드시 3번 재배포 -> 4번 의존성 설치·빌드 검증까지 진행합니다.
+# 기존 로봇의 robotis_interfaces 1.0.0에는 촉각 메시지가 없을 수 있습니다.
+# 4번에서 공식 HandPressures/TactileSensor만 추가하고 해당 패키지만 재빌드합니다.
+# 기존 HandJoints/MoveL 정의는 유지. 이미 설치된 환경은 검증 후 건너뜁니다.
 
 # ============================================================
 # 3. PC -> AI Worker 소스 rsync + 컨테이너 설치
@@ -71,6 +81,10 @@ if pgrep -f '[r]os2_control_node' >/dev/null; then
   echo '[STOP] ros2_control_node 실행 중입니다. robot 세션을 먼저 종료하세요.' >&2
   exit 1
 fi
+# 기존 로봇 ROS 메시지 의존성 보완. 모터 실행 없음; 인터넷 다운로드 불필요.
+# 변경 전 소스·빌드·설치 백업: /root/ros2_ws/tactile_interface_backups/<시각>/
+# HandPressures 헤더 누락 오류는 이 단계가 성공한 뒤 broadcaster를 다시 빌드합니다.
+bash hardware/setup_hand_pressure_interfaces.sh
 # 팔 solver/팔꿈치 제한/충돌 모델 변경은 반드시 C++ 재빌드가 필요합니다.
 if ! python3 -B -m hardware.build_sh5_hands --verify-only; then
   python3 -B -m hardware.build_sh5_hands --rebuild
@@ -90,7 +104,8 @@ python3 -B -m hardware.build_hand_write_rate --verify-only
 python3 -B -m hardware.build_hand_pressure
 python3 -B -m hardware.build_hand_pressure --verify-only
 ROBOT_BUILD
-# 두 빌드가 Verified여야 실행합니다. 전체 AI Worker colcon 재빌드는 불필요합니다.
+# 인터페이스 설치 및 SH5·손 쓰기·촉각 broadcaster 검증이 모두 성공해야 실행합니다.
+# 전체 AI Worker colcon 재빌드는 불필요합니다.
 # 새 프로필은 다음 robot 세션이 생성·검증합니다. 예전 프로필을 수동 복사하지 마세요.
 # 소스 hash가 다르다는 오류는 robot 기반 Cyclo/드라이버 버전을 확인해야 합니다.
 
@@ -132,10 +147,13 @@ bash "$TELEOP_REPO/teleop.sh" pc \
 # A 단독: pointing. Trigger에 따라 검지 유지 전류 한도 증가(기존 300 raw 이내).
 # X 단독: 원래 mode 1 grip pinch 궤적. 엄지 25%, 검지·중지 15% 굽힌 상태에서 시작.
 # Y 단독: 엄지·검지만 pinch. 중지·약지·새끼는 열린 상태 유지.
-# Trigger를 갑자기 놓아도 손은 속도 제한을 따라 천천히 열림.
+# controllers mode 1: Trigger/grip 모두 쥐기·놓기를 기존 설정 속도의 25%로 제한.
+# mode 2 Trigger도 같은 25% 기준. 갑자기 놓아도 손은 속도 제한을 따라 천천히 열림.
 # 팔꿈치 QP 가중치는 정지/이동 모두 0. 이동 중에도 grip을 누른 팔은 추종.
 # 오른쪽 stick: lift + MOBILE 회전을 대각선으로 동시에 입력 가능.
 # 양쪽 stick 클릭: HEAD/MOBILE 전환. 왼쪽 head/mobile 축 선택 정책 유지.
+# controllers mode 1/2 공통: MOBILE 부호 전환 시 중립 재입력 없이 반대 방향 목표 반영.
+# 가속도/jerk 제한을 따라 감속 후 반전하며, 방향 전환 캔슬은 없음.
 # 변경된 Y pose JSON은 robot 설치 + 세션 재시작으로 반영(C++ 재빌드 불필요).
 # 이번 전체 버전 업데이트는 4번 SH5 C++ 빌드도 수행해야 합니다.
 # robot 명령에 --base-speed 0.10 --turn-speed 0.15 추가 가능.
@@ -145,9 +163,10 @@ bash "$TELEOP_REPO/teleop.sh" pc \
 # grip 해제 / B+Y HOLD 중에도 Loop 데이터는 30Hz 연속 전송.
 # HOLD action은 측정 위치로 기록하며 action_valid=0. 로봇에 추가 명령을 보내지 않음.
 # 첫 프레임부터 기록 열 고정: lift 명령이 뒤늦게 생겨 Parquet 저장 실패하던 오류 수정.
-# 기본 training: 19채널(관절 관측/명령 12 + flags/valid 3 + 양손 pressure/status 4).
-# robot-aiworker.parquet에 observation.left_hand.tactile_pressure / right_hand.tactile_pressure 포함.
-# pressure는 손마다 45개. 누락/오래된 데이터는 NaN, tactile_status의 fresh=0으로 구분.
+# 기본 training: aiworker 15채널(관절 관측/명령 12 + flags/valid 3).
+# 압력은 HX5-D20 전용 Tactile 소스로만 전송. aiworker에는 촉각 채널 없음.
+# HX5-D20의 left_hand/right_hand 각각 45개 raw uint8(0..255). 누락/오래된 값은 전송 생략.
+# Loop Recorder Preview Sources에서 aiworker=Robot State, HX5-D20=Tactile 역할로 선택.
 # 변경 후 Loop Preview에서 aiworker를 다시 선택하고 Cell Config 저장 후 새 recording 시작.
 
 # ============================================================

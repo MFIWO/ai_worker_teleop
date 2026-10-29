@@ -59,7 +59,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self._ready_request_id = None
         self._controller_event_rx = -1e9
         self._stick_log_at = -1e9
-        self._mobile_filter = MobileStickFilter()  # [ADDED] neutral calibration and anti-rebound
+        self._mobile_filter = MobileStickFilter()  # [ADDED] neutral calibration and velocity shaping
         self._operator_keys = set()
         self._operator_rx = -1e9
         self._operator_tick = time.monotonic()
@@ -194,7 +194,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
     def publish_right_joystick(self, thumbstick_value):
         if not self.arm_control_enabled:return  # HOLD permits base and pan/tilt only.
         # Only the RIGHT stick permits simultaneous lift/yaw. Keep the legacy
-        # lift sign and all mobile yaw acceleration/jerk/reversal filtering.
+        # lift sign and mobile yaw acceleration/jerk filtering.
         now = time.monotonic()
         previous = getattr(self,'_lift_tick',None)
         self._lift_tick = now
@@ -232,7 +232,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         self.last_head_publish_sec = now
 
     def publish_cmd_vel_from_thumbstick(self, left_thumbstick_value, right_thumbstick_value):
-        """Shape SH5 mobile stick commands and avoid diagonal and rebound. [CHANGED 2026-10-28]"""
+        """Shape SH5 mobile stick commands and avoid diagonal translation. [CHANGED 2026-10-28]"""
         if self.joystick_mode:
             self._mobile_filter.disarm('returned to HEAD')
             self._aux_base = [0., 0., 0.]

@@ -27,7 +27,7 @@ class LoopVRTests(unittest.TestCase):
         payload[pressure]=None
         initial=recording_payload(payload,'ffw_sh5_vr',dict(action_valid=[0.]*7))
         self.assertTrue(all(value is not None for value in initial.values()))
-        self.assertTrue(all(math.isnan(v) for v in initial[pressure]))
+        self.assertNotIn(pressure,initial)
         self.assertEqual(initial[prefix+'action.lift.joint_position'],[.1])
         payload[pressure]=list(range(45))
         payload[prefix+'action.lift.joint_position']=[.3]
@@ -37,7 +37,7 @@ class LoopVRTests(unittest.TestCase):
         self.assertEqual(active[prefix+'action.lift.joint_position'],[.3])
         held=recording_payload(payload,'ffw_sh5_vr',dict(action_valid=[0.]*7))
         self.assertEqual(held[prefix+'action.lift.joint_position'],[.1])
-        self.assertEqual(held[pressure],list(range(45)))
+        self.assertNotIn(pressure,held)
         self.assertEqual(held[prefix+'teleop.action_valid'],[0.]*7)
 
     def test_missing_feedback_is_explicitly_invalid_and_never_zero_filled(self):

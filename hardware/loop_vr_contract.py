@@ -53,7 +53,8 @@ def recording_payload(payload, robot_type, status):
     observations use NaN and validity flags. Non-valid joint actions use the
     current measured hold position. This never publishes a robot command.
     """
-    result = dict(payload)
+    result = {key: value for key, value in payload.items()
+              if not key.endswith((".tactile_pressure", ".tactile_status", ".tactile_timing"))}
     prefix = robot_type + '.'
     action_valid = list(status['action_valid'])
     observation_valid = []
@@ -76,7 +77,6 @@ def recording_payload(payload, robot_type, status):
     result[prefix + 'teleop.action_valid'] = action_valid
     result[prefix + 'teleop.observation_valid'] = observation_valid
     optional = {'teleop.controller_inputs': 4, 'teleop.hand_pose_state': 4}
-    optional.update({f'observation.{side}_hand.tactile_pressure': 45 for side in ('left', 'right')})
     for key, size in optional.items():
         full = prefix + key
         if full in result and result[full] is None:

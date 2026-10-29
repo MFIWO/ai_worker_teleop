@@ -213,12 +213,11 @@ Yaw from the right stick is also suppressed while translation is active.
 [CHANGED 2026-10-28] The MOBILE setpoint is now jerk- and
 acceleration-clamped: discrete acceleration is `(v_k - v_(k-1))/dt`,
 and its step is limited by the declared per-axis `JERK` limit.
-During braking, each component approaches zero monotonically and is
-clamped at zero rather than crossing to the opposite sign. Reversing
-direction intentionally requires the stick to pass through neutral
-**after the previous commanded velocity reaches zero**, then a new
-opposite press. This is deliberately stricter than the old 0.16-second
-reversal timer, which could allow a long stick rebound to reverse.
+When the stick is released, each component brakes to zero without crossing
+into the opposite sign. An opposite stick input immediately becomes the
+new target; acceleration/jerk limits smooth the reversal through zero.
+No neutral sample or second press is required for sign changes in either
+controller hand mode 1 or 2.
 Yaw and translation also cannot overlap during a mode-direction change.
 A forced stop or invalid tracking sample can bypass a smooth jerk ramp
 to publish zero immediately. Loss of a fresh controller frame or ACTIVE
@@ -270,10 +269,10 @@ unchanged but its channel layout has changed.
 
 Robot State uses robot type ffw_sh5_vr, action space joint_position, and
 finger type HX5-D20. The default **training** profile selects robot and
-hand joint observations/actions, both hands' numeric pressure/status, and
-teleop.flags, teleop.action_valid and teleop.observation_valid (19 channels).
+hand joint observations/actions and teleop.flags, teleop.action_valid and
+teleop.observation_valid (15 channels). Pressure is exclusive to HX5-D20.
 On the robot command, use --loop-channels qpos|training|all or an exact
-comma-separated key list. --loop-no-tactile omits both tactile formats;
+comma-separated key list. --loop-no-tactile omits the dedicated Tactile source;
 --loop-no-camera is separate. See hardware/LOOP_SOURCE_SPLIT.md.
 Select camera sources exposed by the existing robot camera implementation.
 Start,
@@ -326,12 +325,9 @@ build and state-only broadcasters do not send motor commands.
 Each hand's 20-joint observation/action vectors are part of **aiworker**
 Robot State. The independent **HX5-D20 Tactile** source carries two typed
 channels, left_hand and right_hand, each with up to 45 raw uint8 readings.
-The aiworker Robot State additionally declares numeric
-`ffw_sh5_vr.observation.left_hand.tactile_pressure` and
-`ffw_sh5_vr.observation.right_hand.tactile_pressure` (45 values each) so pressure
-appears beside joint positions in `robot-aiworker.parquet`. Per-hand
-`tactile_status` is [received,valid,fresh,hz]. These are included by default
-under training; qpos deliberately selects only joint observations.
+Pressure is exclusive to the HX5-D20 Tactile source. aiworker declares no
+pressure/status channels and robot-aiworker.parquet contains only selected
+robot joint/action/teleop data.
 
 Pressure ordering is `finger_l_sensor1..5` / `finger_r_sensor1..5`, each with
 `Present Pressure 1..9` in row-major order (top to bottom, left to right).
@@ -342,9 +338,8 @@ middle, ring, little; pressing the physical right thumb confirmed sensor1
 typed channels represent the two hands, not two individual fingers.
 Missing/duplicate sensors, invalid
 interface names and values outside 0..255 invalidate that hand's sample.
-Malformed or older-than-0.5-second pressures are omitted from typed Tactile;
-their numeric mirror is a 45-element NaN vector with fresh=0, never fabricated
-zeros. All-zero fresh pressures are valid unloaded sensor readings.
+Malformed or older-than-0.5-second pressures are omitted from typed Tactile,
+never replaced with fabricated zeros. All-zero fresh pressures are valid unloaded sensor readings.
 ROS fixed uint8 arrays contain `numpy.uint8` scalars; the parser accepts these
 integer readings and converts them to Python integers for the Loop payload.
 

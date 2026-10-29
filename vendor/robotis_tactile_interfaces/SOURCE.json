@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/ROBOTIS-GIT/robotis_interfaces",
+  "commit": "c79afb6aa8d0900401ec38ecdb60b1a104929997",
+  "paths": ["msg/HandPressures.msg", "msg/TactileSensor.msg"],
+  "changes": "none"
+}
