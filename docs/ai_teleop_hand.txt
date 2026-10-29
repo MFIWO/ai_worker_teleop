@@ -50,6 +50,14 @@ git rev-parse HEAD
 # 기존 로봇의 robotis_interfaces 1.0.0에는 촉각 메시지가 없을 수 있습니다.
 # 4번에서 공식 HandPressures/TactileSensor만 추가하고 해당 패키지만 재빌드합니다.
 # 기존 HandJoints/MoveL 정의는 유지. 이미 설치된 환경은 검증 후 건너뜁니다.
+# 다른 AI Worker도 3번 소스 복사 후 4번 메시지 설치·세 빌드 검증을 수행하세요.
+# 손 bringup은 5/6번 robot --bringup 세션에 통합되어 있습니다.
+# 기존 SH5 follower/controller_manager에 pressure_l/r_broadcaster를 추가합니다.
+# ros2 launch robotis_hand_bringup hx5_d20_right.launch.py를 따로 실행하지 마세요.
+# follower가 이미 실행 중이면 종료·손 토크 OFF 확인 후 --bringup으로 재시작하세요.
+# 이번 Python 변경(모드 1 속도/MOBILE 반전/Loop 채널)은 PC install·로봇 재배포 후 세션 재시작으로 반영.
+# 4번 C++ 빌드는 manifest 검증 실패 시에만 해당 overlay를 재빌드합니다.
+# Loop 앱의 HX5-D20 채널 선택·그래프 패치는 8번 참고(Loop 1.2.1 전용).
 
 # ============================================================
 # 3. PC -> AI Worker 소스 rsync + 컨테이너 설치
@@ -209,3 +217,25 @@ TRACE_BUILD
 # 양손 각각 sensor1..5 = 엄지/검지/중지/약지/새끼, 손가락마다 압력 9개(0..255).
 # 무접촉에서 0은 정상. 오른손 엄지 ID115 눌렀을 때 255까지 반응하고 떼면 0 확인.
 # ROS uint8 배열(numpy.uint8)을 거부하던 파서도 수정. 실제 ROS 메시지 회귀검사 통과.
+
+# ============================================================
+# 8. Loop 1.2.1 — Tactile 그래프·채널 선택 UI 설치(PC별 1회)
+# ============================================================
+# HX5-D20은 Tactile 종류를 유지하며 기존 Robot State와 같은 그래프·Fields 선택기를 사용.
+# Recorder 검토 화면 및 Episodes 상세 화면에 적용. 기존 저장된 촉각 데이터에도 적용.
+# aiworker에 촉각 채널을 다시 추가하지 않음. 로봇 C++ 빌드와 무관한 PC 앱 패치.
+# 먼저 진행 중인 녹화를 저장하고 Loop 앱을 완전히 종료하세요.
+cd "$TELEOP_REPO"
+python3 loop/scripts/patch_tactile_viewer.py --check
+sudo python3 loop/scripts/patch_tactile_viewer.py --apply
+python3 loop/scripts/patch_tactile_viewer.py --check
+# 설치 후 Loop를 다시 실행. 예전 숫자 샘플 화면이 남으면 앱을 완전히 종료한 뒤 캐시만 백업:
+loop_ui_cache="$HOME/.cache/Loop/QtWebEngine/pywebview/Cache"
+if [ -d "$loop_ui_cache" ]; then
+  mv "$loop_ui_cache" "${loop_ui_cache}.before-tactile-graph.$(date +%Y%m%d_%H%M%S_%N)"
+fi
+# 이제 Loop 앱을 엽니다. HX5-D20에서 Fields의 left_hand/right_hand 채널을 선택하세요.
+# 그래프 클릭·상단 재생바로 시점 이동. 무접촉 압력 0은 정상.
+# Loop 업데이트 후에는 --check로 호환성 확인. 지원하지 않는 버전은 덮어쓰지 않고 중단.
+# 원본 UI 복원(Loop 종료 후 필요할 때만 실행):
+# sudo python3 loop/scripts/patch_tactile_viewer.py --restore
