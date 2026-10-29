@@ -35,7 +35,7 @@ class FourWayIntegrationTests(unittest.TestCase):
                 with self.subTest(side=side, pose=pose):
                     self.assertIn(pose, poses[side])
                     self.assertIn(pose, POSE_CODES)
-        self.assertEqual(MODE2_TRIGGER_CLOSE_SPEED_SCALE, 0.5)
+        self.assertEqual(MODE2_TRIGGER_CLOSE_SPEED_SCALE, 0.25)  # [FIX 2026-10-29] Actual main mode-2 rate.
 
     def test_pc_retains_mobile_stabilization_and_arm_clutch(self):
         source = self._source(
