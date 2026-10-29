@@ -239,7 +239,9 @@ class SH5HandOutput:
     def prepare_targets(self,desired,measured,now):
         for side,item in self.controls.items():
             pose = item.get('pose')
-            if pose != 'tripod_deep' or item['trigger']<=.02:  # [CHANGED] prepare both selected pinches
+            # [CHANGED 2026-10-29] Restore historical A thumb-out prepositioning.
+            # Keep all 16 other joints at their measured pose until the thumb arrives.
+            if pose not in ('tripod_deep','thumb_out_grip') or item['trigger']<=.02:
                 self.preparing.pop(side,None)
                 continue
             names=FINGER_NAMES[side]
@@ -249,8 +251,9 @@ class SH5HandOutput:
                     'held':{name:measured[name] for name in names}}
             state=self.preparing[side]
             if state['done']:continue
-            # [CHANGED] Preposition the thumb for either pinch before closing the
-            # selected fingers. Measured arrival and URDF slew are preserved.
+            # [CHANGED 2026-10-29] Preposition thumb before finger closure,
+            # preserving the existing measured-arrival gate, slew cap and timeout.
+            # This is a target-pose restoration, not verified fingertip contact.
             prep=dict(state['held'])
             prep.update(zip(names[:4],self.poses[side][pose][:4]))
             checked=names[:4]
@@ -295,6 +298,7 @@ class SH5HandOutput:
                                  'index_pinch':'index_prepare',
                                  'thumb_index_pinch':'thumb_index_prepare',
                                  'full_grip':'full_prepare',
+                                 'thumb_out_grip':'open',  # [CHANGED] A starts open, thumb advances first.
                                  'ulnar_pinch':'ulnar_prepare'}.get(pose,'open')
                 baseline = self.poses[side][baseline_name]
                 closed = self.poses[side][pose]
