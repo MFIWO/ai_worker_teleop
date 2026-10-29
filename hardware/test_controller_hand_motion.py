@@ -249,13 +249,16 @@ class HandMotionTests(unittest.TestCase):
         scope={'time':SimpleNamespace(monotonic=lambda:10.),'lift_target':lift_target}
         exec(compile(ast.fix_missing_locations(isolated),str(path),'exec'),scope)
         n=scope['Publisher']();n.control_min_period=1/30;n.last_lift_command=None
-        n.lift_joint_current_position=-.25;n._aux_joints={}
+        n.lift_joint_current_position=-.25;n._aux_joints={};n.arm_control_enabled=True
         n._hardware_manifest={'auxiliary_limits':{'lift_joint':dict(lower=-.5,upper=0.,velocity=.3)}}
         n.get_logger=lambda:SimpleNamespace(warning=Mock())
         for mode in (False,True):
             n.joystick_mode=mode;n._lift_tick=None;n.last_lift_command=None
             n.publish_right_joystick(.707)
             self.assertGreater(n._aux_joints['lift_joint'],-.25)
+        n.arm_control_enabled=False;n._aux_joints={}
+        n.publish_right_joystick(.707)
+        self.assertEqual(n._aux_joints,{})
 
     def test_B_ready_action_preserves_selected_grasp(self):
         modes=ControllerHandModes()

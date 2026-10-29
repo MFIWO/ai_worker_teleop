@@ -41,6 +41,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
     STILL_WINDOW_SECONDS = 0.03
     POST_STOP_POSE_SECONDS = 0.05
     def __init__(self, start_server=True):
+        self._hold_sticks_enabled = False
         self._fast_resume_at = None
         self._controller_mode = os.environ.get('AI_WORKER_SH5_INPUT','hands') == 'controllers'
         self._hand_mode = int(os.environ.get('AI_WORKER_SH5_HAND_MODE','1'))
@@ -99,16 +100,16 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             self._xr_hands=XRHandInput(self)
         if not self._controller_mode:self.vuer.add_handler('HAND_MOVE')(self.on_hand_move)
         self.create_service(SetBool, '/sh5_teleop/enable', self._enable_service)
-        # [INTEGRATED PR #3] Robot-owned ready supervisor is controller mode-2 only.
-        if self._controller_mode and self._hand_mode == 2:
+        # Both controller modes use the robot-owned ready supervisor.
+        if self._controller_mode:
             self._body_elbow_pub = self.create_publisher(Bool, '/xr_hardware/body_elbows_relaxed', 1)
             self._ready_request_pub = self.create_publisher(String, '/xr_hardware/ready_request', 10)
             self.create_subscription(String, '/xr_hardware/ready_state', self._ready_feedback, 10)
         if self._controller_mode:
-            self.get_logger().info('[SH5 CONTROLLERS] X+A start/re-zero, Y+B HOLD; triggers select hand pose; each grip enables its own arm while pressed. Loop keys disabled.')
-            self.get_logger().info('[STICKS] Initial HEAD mode: left=head, right up/down=lift. Both stick clicks toggle MOBILE: left=translation, right left/right=yaw, right up/down=lift. Requires ACTIVE.')
+            self.get_logger().info('[SH5 CONTROLLERS] X+A start/re-zero, Y+B HOLD; B=arm ready. Loop keys disabled.')
+            self.get_logger().info('[STICKS] Initial HEAD mode: left=head, right up/down=lift. Both stick clicks toggle MOBILE: left=translation, right left/right=yaw, right up/down=lift. Lift requires ACTIVE; mode 1 permits base and pan/tilt after Y+B.')
             self.get_logger().info(f'[HAND MODE {self._hand_mode}] '+(
-                'Original proportional trigger grasp; grip=thumb/index/middle pinch.' if self._hand_mode==1 else
+                'Trigger=four-finger grasp, grip=thumb/index/middle pinch; arms follow without grips. Y+B holds arms/hands and permits base/pan-tilt.' if self._hand_mode==1 else
                 'Tap X=thumb/index/middle C-grip, Y=thumb/index pinch, A=pointing, B=arm ready. Each grip enables its own arm while pressed.'))
         elif self._hand_mode==2:
             self.get_logger().info('[SH5 HANDS MODE 2] Fingers use xr_ai_teleop HX5 DexPilot; 25-point HAND_MOVE input, no BODY resampling. Existing arm path retained.')
@@ -175,7 +176,23 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         return (self._controller_mode and time.monotonic()-self._controller_event_rx <= .3
                 and bool((self._hardware_manifest or {}).get('manual_auxiliary')))
 
+    def _hold_sticks_ready(self, now):
+        gate = self._gate_state or {}
+        return bool(self._controller_mode and self._hand_mode == 1 and self.hardware_allow_arm
+                    and self._hold_sticks_enabled and not self.arm_control_enabled
+                    and not self._ready_rehome_pending and not self._controller_fault_latched
+                    and (self._hardware_manifest or {}).get('manual_auxiliary')
+                    and now-self._controller_event_rx <= .3
+                    and self._tracking_input_state(now) == 'fresh'
+                    and self._joint_rx is not None and 0 <= now-self._joint_rx <= .5
+                    and 0 <= now-self._gate_rx <= .5 and not gate.get('fault'))
+
+    def _controller_aux_ready(self, now=None):
+        now = time.monotonic() if now is None else now
+        return super()._controller_aux_ready(now) or self._hold_sticks_ready(now)
+
     def publish_right_joystick(self, thumbstick_value):
+        if not self.arm_control_enabled:return  # HOLD permits base and pan/tilt only.
         # Only the RIGHT stick permits simultaneous lift/yaw. Keep the legacy
         # lift sign and all mobile yaw acceleration/jerk/reversal filtering.
         now = time.monotonic()
@@ -275,7 +292,6 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                         raw = float(state['triggerValue'])
                         grip = float(state.get('squeezeValue',float(bool(state.get('squeeze',False)))))
                         if not np.isfinite([raw,grip]).all():raise ValueError('nonfinite controller hand input')
-                        # [INTEGRATED PR #3] Mode-2 grip controls arms, never pinch fingers.
                         controls[side] = dict(trigger=self.calibrate_trigger(side,raw),
                                               grip=0.0 if self._hand_mode==2 else min(1.,max(0.,grip)))
                 except (KeyError,TypeError,ValueError):controls = None
@@ -288,7 +304,11 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                 item=(hand_controls or {}).get(side,{})
                 active_codes.append(5 if self._hand_mode==1 and item.get('grip',0.)>.05 else
                     POSE_CODES.get(item.get('pose','full_grip'),0) if item.get('trigger',0.)>.02 else 0)
-            return {'manual_enabled':False,'hand_input':'controllers','controller_values':controls,
+            manual = self._hold_sticks_ready(now)
+            return {'manual_enabled':manual,
+                    'manual_aux': {'joints':{k:v for k,v in self._aux_joints.items() if k.startswith('head_joint')},
+                                   'base':list(self._aux_base)} if manual else {},
+                    'hand_input':'controllers','controller_values':controls,
                     'hand_mode':self._hand_mode,'controller_hands':hand_controls,
                     'hand_pose_state':[self._hand_mode,POSE_CODES[self._hand_modes.selected] if self._hand_mode==2 else 0,*active_codes],
                     'recording_epoch_us':time.time_ns()//1000}
@@ -347,7 +367,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                     self._hand_modes.reset_grasps()
                     self._hand_modes.reset_buttons()
                     self.arm_start_armed = False
-                    self.get_logger().info('[B READY] Arms at ready pose; release grips and A/X, then press A+X to recapture the VR zero.')
+                    self.get_logger().info('[B READY] Arms at ready pose; release A/X, then press A+X to recapture the VR zero.')
                 elif state == 'FAILED':
                     # Fail closed. Old commanded Cyclo q_desired cannot be reused.
                     self.get_logger().error('[B READY FAILED] ' + str(report.get('message','inspect robot session')))
@@ -361,6 +381,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
         if enabled and getattr(self, '_ready_rehome_pending', False):
             self.get_logger().warning('[B READY] A+X blocked until measured ready-pose acknowledgement')
             return
+        self._hold_sticks_enabled = bool(not enabled and reason == 'Y+B buttons' and self._session is not None)
         return super()._set_arm_control_enabled(enabled, reason)
 
     def _snapshot(self):
@@ -436,34 +457,34 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             return
         self._controller_event_rx = time.monotonic()
         with self._xr_lock:
-            if self._hand_mode == 2:
+            if self._hand_mode in (1,2):
                 data = event.value
                 if (self._xr_ready and isinstance(data,dict)
                         and all(isinstance(data.get(s+'State'),dict) for s in SIDES)):
                     left,right = data['leftState'],data['rightState']
                     changed = self._hand_modes.buttons(left,right)
-                    if changed:
-                        self.get_logger().info(f'[HAND POSE] {changed[0]} -> {changed[1]}; each trigger captures its own pose')
-                    def held(state):
-                        value=state.get('squeezeValue', float(bool(state.get('squeeze',False))))
-                        return (isinstance(value,(int,float)) and np.isfinite(value)
-                                and float(value)>=.55)
-                    left_grip,right_grip = held(left),held(right)
-                    if left_grip and not self._clutch_held:
-                        self._clutch_reanchor_pending = True
-                    self._clutch_held = left_grip
-                    if not left_grip:
-                        self._last_input.pop('left', None)
-                    if right_grip and not self._right_grip_held:
-                        self._right_clutch_reanchor_pending = True
-                    if not right_grip:
-                        self._last_input.pop('right', None)
+                    if self._hand_mode == 2:
+                        def held(state):
+                            value=state.get('squeezeValue', float(bool(state.get('squeeze',False))))
+                            return (isinstance(value,(int,float)) and np.isfinite(value)
+                                    and float(value)>=.55)
+                        left_grip,right_grip = held(left),held(right)
+                        if left_grip and not self._clutch_held:
+                            self._clutch_reanchor_pending = True
+                        self._clutch_held = left_grip
+                        if not left_grip:
+                            self._last_input.pop('left', None)
+                        if right_grip and not self._right_grip_held:
+                            self._right_clutch_reanchor_pending = True
+                        if not right_grip:
+                            self._last_input.pop('right', None)
+                        self._right_grip_held = right_grip
                     if changed and changed[1] == 'ready_pose' and not self._ready_rehome_pending:
                         # [DEBUG] Require the robot supervisor actually to be
                         # subscribed before disarming and emitting a one-shot
                         # motion-recovery request. Missing server => no action.
                         if self._ready_request_pub.get_subscription_count() == 0:
-                            self.get_logger().warning('[B READY] Ready supervisor missing; restart matching mode-2 robot launcher')
+                            self.get_logger().warning('[B READY] Ready supervisor missing; restart matching robot launcher')
                         elif self._tracking_input_state() == 'fresh':
                             self._set_arm_control_enabled(False, 'B requests arm ready pose')
                             self._ready_rehome_pending = True
@@ -477,7 +498,6 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
                             self.get_logger().warning('[B READY] Arm HOLD; robot supervisor restarting controller around measured ready motion. A+X blocked.')
                         else:
                             self.get_logger().warning('[B READY] Refused: stale body/controllers/robot feedback')
-                    self._right_grip_held = right_grip
                 else:
                     self._hand_modes.reset_buttons()
                     self._clutch_held = False

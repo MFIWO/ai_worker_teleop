@@ -419,7 +419,7 @@ def main():
         print('[SESSION] PC/VR exit holds motion and keeps this robot session/follower running. '
               'Closing this robot terminal stops SH5 follower after 3s and verifies finger torque OFF. '
               f'Service logs: {logs}',flush=True)
-        if args.input == 'controllers' and args.hand_mode == '2':
+        if args.input == 'controllers':
             # [INTEGRATED PR #3] The robot supervisor owns serialized ready recovery.
             # PR #1 Loop streaming and PR #4 HX5 driver remain unchanged.
             mode2_ready_recovery_loop(children, services, controller)

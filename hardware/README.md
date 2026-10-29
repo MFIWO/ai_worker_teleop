@@ -629,3 +629,23 @@ Cartesian defaults are now 3 m/s and 15 rad/s; input freshness is 5 s and the ha
 Physical URDF position/velocity limits and collision checks remain. Shared hardware defaults also apply to SG2 hardware mode.
 SH5 simulation entrypoints are now included in this checkout, with 2 m/s and 10 rad/s Cartesian defaults.
 Runtime testing was not performed for these changes.
+
+
+### Controller hand mode 1 (2026-10-29)
+
+Use `--input controllers --hand-mode 1` on both PC and robot launchers.
+A+X starts both arms without holding either grip. Grip proportionally applies
+the original thumb/index/middle pinch; trigger applies the original four-finger
+grasp. B alone requests the robot-supervised arm ready pose; after completion,
+release A/X and press A+X to re-anchor. B+Y holds arms and hands while permitting
+MOBILE base motion and HEAD pan/tilt. Both stick clicks still switch HEAD/MOBILE.
+Lift remains ACTIVE-only. Fresh tracking, robot feedback and the gate's fault,
+lease and collision checks still apply. Loop recording continues during HOLD.
+Mode 2 keeps its preset buttons and per-arm grip clutches.
+
+HX5-D20 tactile frames now carry `values_i16` numeric pressure samples alongside
+the original uint8 `raw` bytes (left/right, thumb/index/middle/ring/little,
+nine row-major samples per finger, 0–255 raw counts). This supplies numeric data
+to the tactile source itself. Robot State pressure mirrors remain for existing
+training exports. Restart the robot session and record a new episode to include
+these numeric tactile fields; old episodes are not rewritten.

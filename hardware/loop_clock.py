@@ -110,7 +110,7 @@ class ClockedTactileStreamer:
             source_key='robotis-vr-sh5-tactile', name=HAND_MODEL,
             channels=tuple(TactileChannelSpec(
                 key=side + '_hand',
-                label=side + ' fingers 1..5, row-major 3x3, raw 0..255',
+                label=side + ' thumb,index,middle,ring,little; row-major 3x3; raw counts 0..255',
                 sample_format='uint8', sample_count=45) for side in HAND_SIDES)))
         self.producer = SourceProducer.connect(self.loop_addr, schema)
         deadline = time.monotonic() + 5
@@ -132,7 +132,8 @@ class ClockedTactileStreamer:
             if len(values) != 45 or any(type(v) is not int or v < 0 or v > 255
                                          for v in values):
                 raise ValueError(f'invalid HX5-D20 {side} tactile frame; expected 45 uint8')
-            channels.append(TactileChannelValue(key=side + '_hand', raw=bytes(values)))
+            channels.append(TactileChannelValue(key=side + '_hand', raw=bytes(values),
+                                                values_i16=tuple(values)))
         if channels:
             self.producer.send_tactile(stamp, self.sent_count, tuple(channels))
         self.sent_count += 1  # sequences follow the same 30 Hz ticks as aiworker

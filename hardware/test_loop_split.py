@@ -170,6 +170,7 @@ class LoopSourceTests(unittest.TestCase):
                 self.assertEqual(len(tactile_frame[2]), 1)
                 self.assertEqual(tactile_frame[2][0].key, 'left_hand')
                 self.assertEqual(tactile_frame[2][0].raw, bytes(range(45)))
+                self.assertEqual(tactile_frame[2][0].values_i16, tuple(range(45)))
                 payload[PREFIX + 'observation.left_hand.tactile_pressure'] = None
                 self.assertTrue(sender.send(payload))
                 self.assertEqual(len(sender.robot.producer.frames), 2)
@@ -236,6 +237,7 @@ class LoopSourceTests(unittest.TestCase):
             PREFIX + 'observation.left_hand.tactile_pressure': [255]*45,
         }, stamp=123)
         self.assertEqual(sender.tactile.producer.frame.channels[0].raw, bytes([255]*45))
+        self.assertEqual(sender.tactile.producer.frame.channels[0].values_i16, (255,)*45)
         sender.close()
 
 
