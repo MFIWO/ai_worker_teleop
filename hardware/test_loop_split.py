@@ -126,6 +126,12 @@ class LoopSourceTests(unittest.TestCase):
         with patch.dict(sys.modules, loop_sdk=fake_sdk()):
             with patch('hardware.loop_clock.time.monotonic', return_value=10.2):
                 sender.connect()
+                self.assertEqual([s.kind.value for s in FakeProducer.schemas], ['robot'])
+                self.assertTrue(sender.send({}))
+                self.assertIsNone(sender.tactile.producer)
+                sender.send({PREFIX+'observation.left_hand.tactile_pressure':[0]*45, PREFIX+'observation.right_hand.tactile_pressure':[0]*45})
+                sender.robot.producer.frames.clear()
+                sender.tactile.producer.frames.clear()
                 self.assertEqual([s.kind.value for s in FakeProducer.schemas],
                                  ['robot', 'tactile'])
                 robot_schema, tactile_schema = FakeProducer.schemas
@@ -152,7 +158,7 @@ class LoopSourceTests(unittest.TestCase):
                 robot_frame = sender.robot.producer.frames[0]
                 tactile_frame = sender.tactile.producer.frames[0]
                 self.assertEqual(robot_frame[:2], tactile_frame[:2])
-                self.assertEqual(robot_frame[1], 0)
+                self.assertEqual(robot_frame[1], 2)
                 self.assertEqual(set(robot_frame[2]), declared)
                 self.assertEqual(robot_frame[2][PREFIX + 'observation.left_hand.joint_position'],
                                  [2.]*20)
@@ -166,7 +172,7 @@ class LoopSourceTests(unittest.TestCase):
                 self.assertTrue(sender.send(payload))
                 self.assertEqual(len(sender.robot.producer.frames), 2)
                 self.assertEqual(len(sender.tactile.producer.frames), 1)
-                self.assertEqual(sender.sent_count, 2)
+                self.assertEqual(sender.sent_count, 4)
         sender.close()
         self.assertTrue(all(s.producer is None for s in sender.streams))
 
@@ -191,8 +197,7 @@ class LoopSourceTests(unittest.TestCase):
     def test_no_pc_clock_and_partial_connect_cleanup(self):
         sender = SplitRobotStreamer('unused', DummyMapper(), PCRecordingClock())
         self.assertFalse(sender.send({}))
-        with patch.object(sender.streams[0], 'connect'), \
-             patch.object(sender.streams[1], 'connect', side_effect=ConnectionError), \
+        with patch.object(sender.streams[0], 'connect', side_effect=ConnectionError), \
              patch.object(sender, 'close') as close:
             with self.assertRaises(ConnectionError):
                 sender.connect()
@@ -222,6 +227,7 @@ class LoopSourceTests(unittest.TestCase):
 
         with patch.object(loop_sdk.SourceProducer, 'connect', side_effect=connect):
             sender.connect()
+            sender.tactile.connect()
         self.assertEqual([schema.kind.value for schema in schemas],
                          ['robot', 'tactile'])
         sender.tactile.send({

@@ -67,7 +67,7 @@ def make_files(model, controller_text, description_text, config):
     if p.get('lift_vel_bound', 0.0) != 0.0:
         raise ValueError('hardware arms-only commissioning requires the installed lift velocity bound0')
     # [CHANGED] Same wrist-centric retarget; untouched collision/CBF/startup parameters.
-    p['weight_elbow_position'] = 0.1 if model == 'sh5' else 0.0
+    p['weight_elbow_position'] = 0.0
     for s in SIDES:
         p[f'{s}_traj_topic'] = private_topic(model, s)
         p[f'{s}_raw_traj_topic'] = f'/xr_hardware/{model}/unused/{s}_gripper'

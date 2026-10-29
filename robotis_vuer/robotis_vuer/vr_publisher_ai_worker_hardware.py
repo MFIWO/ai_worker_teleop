@@ -376,7 +376,7 @@ class HardwareXRPublisher(XROverheadPublisher):
                 raise ValueError('controller startup timing is unavailable')
             self._profile_verified = bool(p and
                 v[0].string_value == p['urdf'] and v[1].string_value == p['srdf'] and
-                v[2].type == 3 and v[2].double_value == (0.1 if p.get('arm_limit_policy') == 'sh5_bent_elbow_v1' else 0.0) and
+                v[2].type == 3 and v[2].double_value == 0.0 and
                 v[3].type == 3 and v[3].double_value == 10.0 and
                 v[4].type == 3 and v[4].double_value == 1.0 and
                 v[5].string_value == 'arm_r_link7' and v[6].string_value == 'arm_l_link7' and

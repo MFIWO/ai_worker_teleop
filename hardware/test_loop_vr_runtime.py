@@ -18,9 +18,11 @@ class LoopRuntimeTests(unittest.TestCase):
         from rclpy.node import Node
         from std_msgs.msg import String
         from sensor_msgs.msg import JointState
+        from control_msgs.msg import DynamicJointState, InterfaceValue
         from trajectory_msgs.msg import JointTrajectory,JointTrajectoryPoint
         from loop_sdk import SourceProducer
         from hardware.loop_vr_contract import GROUPS,TOPICS
+        from hardware.hx5_tactile import SENSOR_NAMES, PRESSURE_NAMES
         from hardware.loop_vr_streamer import main
         frames=[]
         tactile_frames=[]
@@ -44,6 +46,7 @@ class LoopRuntimeTests(unittest.TestCase):
             status=fixture.create_publisher(String,'/xr_hardware/gate_status',10)
             intent=fixture.create_publisher(String,'/xr_hardware/intent',10)
             feedback=fixture.create_publisher(JointState,'/joint_states',10)
+            pressure=fixture.create_publisher(DynamicJointState,'/dynamic_joint_states',10)
             commands={n:fixture.create_publisher(JointTrajectory,t,10) for n,t in TOPICS.items() if n!='mobile'}
             begin=time.monotonic()
             seq=0
@@ -54,6 +57,13 @@ class LoopRuntimeTests(unittest.TestCase):
                     manual=2.6<elapsed<3.6
                     names=[n for group,names in GROUPS.items() if group!='mobile' for n in names]
                     feedback.publish(JointState(name=names,position=[.1]*len(names)))
+                    if 2.6<elapsed<3.6:
+                        sensor_names=[name for side in ('left','right') for name in SENSOR_NAMES[side]]
+                        msg=DynamicJointState(joint_names=sensor_names,interface_values=[
+                            InterfaceValue(interface_names=list(PRESSURE_NAMES),values=[float(v) for v in range(9)])
+                            for _ in sensor_names])
+                        msg.header.stamp=fixture.get_clock().now().to_msg()
+                        pressure.publish(msg)
                     intent.publish(String(data=json.dumps(dict(model='sh5',session_id='fixture',sequence=seq,
                         enabled=active,phase='ACTIVE' if active else 'WAIT_START',
                         recording_epoch_us=epoch+int(elapsed*1e6)))))
@@ -73,8 +83,8 @@ class LoopRuntimeTests(unittest.TestCase):
         # CHANGED(2026-10-28): one Robot State, typed Tactile; no fake pressure.
         self.assertEqual([s.kind.value for s in schemas],['robot','tactile'])
         self.assertEqual(schemas[0].robot.name,'aiworker')
-        self.assertEqual(schemas[1].tactile.name,'HX5-D20')
-        self.assertEqual(tactile_frames,[])
+        self.assertGreater(len(tactile_frames),3)
+        self.assertEqual(tactile_frames[0][2][0].raw,bytes(list(range(9))*5))
         declared={c.key for c in schemas[0].robot.channels}
         self.assertIn('ffw_sh5_vr.observation.left_hand.joint_position',declared)
         self.assertIn('ffw_sh5_vr.observation.left_arm.joint_position',declared)

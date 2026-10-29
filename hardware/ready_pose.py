@@ -1,7 +1,7 @@
 """Move selected hardware arms to the xr_tele ready pose before starting the VR controller.
 
 Ready angles and quintic interpolation match xr_tele's robotis_ai_worker.py.
-Only the seven arm joints per side are commanded; grippers/head/lift are omitted.
+Optional SH5 bringup first raises lift to its measured URDF upper bound.
 """
 
 import argparse
@@ -25,15 +25,15 @@ ARM_NAMES = {
 }
 
 
-def make_trajectory(names, start, target, duration, num_points=100):
+def make_trajectory(names, start, target, duration, num_points=100, *, max_speed=3.):
     """Build the same zero-endpoint-velocity quintic used by xr_tele."""
     if (len(names) != len(start) or len(start) != len(target)
             or not start or num_points < 2
             or not all(math.isfinite(v) for v in [*start, *target, duration])
-            or duration <= 0):
+            or duration <= 0 or not math.isfinite(max_speed) or max_speed<=0):
         raise ValueError('Invalid ready-pose trajectory input')
     # Peak derivative of the unit quintic is 1.875; xr_tele's cap is 3 rad/s.
-    duration = max(duration, 1.875 * max(abs(b - a) for a, b in zip(start, target)) / 3.)
+    duration = max(duration, 1.875 * max(abs(b - a) for a, b in zip(start, target)) / max_speed)
     msg = JointTrajectory(joint_names=names)
     for i in range(num_points):
         u = i / (num_points - 1)
@@ -53,9 +53,13 @@ def make_trajectory(names, start, target, duration, num_points=100):
 
 
 class ReadyPoseMover(Node):
-    def __init__(self,model='sg2',session_recovery=False):
+    def __init__(self,model='sg2',session_recovery=False,lift_first=False):
         super().__init__('hardware_arm_ready_pose')
         self.model = model
+        self.lift_first = bool(lift_first)
+        self.lift_limit = None
+        if self.lift_first and model!='sh5':
+            raise ValueError('lift-first bringup supports only SH5')
         self.session_recovery = bool(session_recovery)  # [CHANGED] only launcher-owned Cyclo stop/restart sequence
         if self.session_recovery and model != 'sh5':
             raise ValueError('session ready recovery supports only SH5')
@@ -77,6 +81,8 @@ class ReadyPoseMover(Node):
                                f'/arm_{side}_controller/follow_joint_trajectory')
             for side in ARM_NAMES
         }
+        self.lift_client = (ActionClient(self, FollowJointTrajectory,
+                            '/lift_controller/follow_joint_trajectory') if self.lift_first else None)
 
     def on_description(self,msg):
         import xml.etree.ElementTree as ET
@@ -90,6 +96,17 @@ class ReadyPoseMover(Node):
                     bound = root.find(f"joint[@name='{name}']/limit")
                     if bound is None or not float(bound.get('lower'))<=target<=float(bound.get('upper')):
                         raise ValueError('ready target outside physical description: '+name)
+            if self.lift_first:
+                joint=root.find("joint[@name='lift_joint']")
+                bound=joint.find('limit') if joint is not None else None
+                axis=joint.find('axis') if joint is not None else None
+                if bound is None or axis is None or joint.get('type')!='prismatic':
+                    raise ValueError('physical prismatic lift with limits required')
+                direction=[float(v) for v in axis.get('xyz','').split()]
+                lower,upper,speed=[float(bound.get(k)) for k in ('lower','upper','velocity')]
+                if direction!=[0.,0.,1.] or not all(map(math.isfinite,(lower,upper,speed))) or lower>=upper or speed<=0:
+                    raise ValueError('unexpected lift axis/limits')
+                self.lift_limit=dict(lower=lower,upper=upper,velocity=min(.12,speed))
             self.description_ok = True
         except (ValueError,TypeError,ET.ParseError):self.description_ok = False
 
@@ -99,6 +116,7 @@ class ReadyPoseMover(Node):
         positions = dict(zip(msg.name, msg.position))
         velocities = dict(zip(msg.name, msg.velocity))
         names = ARM_NAMES['l'] + ARM_NAMES['r']
+        if self.lift_first:names=names+['lift_joint']
         if not all(name in positions and math.isfinite(positions[name])
                    and math.isfinite(velocities[name]) for name in names):
             return
@@ -158,6 +176,11 @@ class ReadyPoseMover(Node):
         positions, velocities = self.state
         if any(abs(velocities[n]) > .1 for names in ARM_NAMES.values() for n in names):
             raise RuntimeError('Arms are still moving; wait for follower initialization to finish')
+        if self.lift_first:
+            self.raise_lift()
+            self.check_other_commanders()
+            if not self.fresh():raise RuntimeError('Feedback stopped after lift raise')
+            positions, velocities = self.state
         trajectories = {}
         # Use one shared duration even when the initial poses are asymmetric.
         delta_max = max(abs(positions[n] - q) for names in ARM_NAMES.values()
@@ -196,6 +219,32 @@ class ReadyPoseMover(Node):
         self.get_logger().info(
             'READY: both arms reached the pose; starting the VR publisher')
 
+    def raise_lift(self):
+        """Complete and verify lift motion before sending either arm goal."""
+        self.wait_for(lambda:self.lift_client.server_is_ready(),8.,'lift action server')
+        positions,velocities=self.state
+        bound=self.lift_limit
+        current=positions['lift_joint']
+        if not bound or not bound['lower']-.003<=current<=bound['upper']+.003 or abs(velocities['lift_joint'])>.02:
+            raise RuntimeError('Lift feedback outside physical limits or lift still moving')
+        target=bound['upper']
+        if abs(current-target)>.003:
+            trajectory,duration=make_trajectory(['lift_joint'],[current],[target],3.,max_speed=bound['velocity'])
+            self.get_logger().info(f'BRINGUP: lift first to URDF top {target:.3f}m over {duration:.1f}s; arms held')
+            request=self.lift_client.send_goal_async(FollowJointTrajectory.Goal(trajectory=trajectory))
+            request.add_done_callback(self.remember_handle)
+            self.requests.append(request)
+            self.wait_for(request.done,5.,'lift goal acceptance')
+            if not request.result().accepted:raise RuntimeError('Follower rejected lift raise')
+            result=request.result().get_result_async()
+            self.wait_for(result.done,duration+8.,'lift reaching top')
+            response=result.result()
+            if response.status!=GoalStatus.STATUS_SUCCEEDED or response.result.error_code!=FollowJointTrajectory.Result.SUCCESSFUL:
+                raise RuntimeError('Lift action failed: '+response.result.error_string)
+        self.wait_for(lambda:self.fresh() and abs(self.state[0]['lift_joint']-target)<=.003
+                      and abs(self.state[1]['lift_joint'])<=.01,3.,'measured lift top and stop')
+        self.get_logger().info('BRINGUP: measured lift top verified; starting arm ready trajectory')
+
     def cancel_moves(self):
         self.aborting = True
         self.cancel_requests.extend(handle.cancel_goal_async() for handle in self.handles)
@@ -210,6 +259,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model',choices=('sg2','sh5'),default='sg2')
     parser.add_argument('--duration', type=float, default=5.)
+    parser.add_argument('--lift-first', action='store_true', help='SH5 bringup: lift to physical URDF top before arm goals')
     parser.add_argument('--session-recovery', action='store_true',
                         help='SH5 only: Cyclo already stopped by robot launcher; disarmed VR publisher may remain')
     parser.add_argument('--dry-run', action='store_true',
@@ -217,14 +267,17 @@ def main():
     args = parser.parse_args()
     if not math.isfinite(args.duration) or args.duration <= 0:
         parser.error('--duration must be finite and positive')
+    if args.lift_first and (args.model!='sh5' or args.session_recovery):
+        parser.error('--lift-first applies only to SH5 startup, not ready recovery')
     if args.dry_run:
         print(json.dumps({
             'joint_names': ARM_NAMES, 'target_per_arm': READY_Q,
             'minimum_duration_sec': args.duration, 'robot_commands_published': False,
+            'lift_first':args.lift_first,
         }))
         return 0
     rclpy.init(args=[])
-    node = ReadyPoseMover(args.model, session_recovery=args.session_recovery)
+    node = ReadyPoseMover(args.model, session_recovery=args.session_recovery,lift_first=args.lift_first)
     try:
         node.move(args.duration)
         return 0

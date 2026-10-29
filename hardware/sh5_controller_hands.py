@@ -13,6 +13,7 @@ HAND_SPEED_SCALE = .85
 # [CHANGED 2026-10-28] Controller mode 2 trigger CLOSING only: one quarter of the configured
 # finger velocity. Optical modes, grip-pinch and opening are unaffected.
 MODE2_TRIGGER_CLOSE_SPEED_SCALE = .25
+MODE2_TRIGGER_OPEN_SPEED_SCALE = .25  # spring-back release remains a paced trajectory
 # ROBOTIS DexPilotOptimizer.set_joint_limit expands bounds by 1e-3 rad.
 # Accept that solver margin at input, then clamp to the physical URDF bounds.
 # This never expands the limits of a command sent to the hand.
@@ -64,7 +65,7 @@ def load_poses(limits):
     if config.get('schema') not in (1,2) or config.get('model') != 'HX5-D20':
         raise ValueError('unsupported controller hand pose layout')
     for side,names in FINGER_NAMES.items():
-        expected = {'open','grasp','pinch'} | (set(POSE_CODES)|{'angled_prepare','pointing_prepare','index_prepare','full_prepare','ulnar_prepare'} if config['schema']==2 else set())
+        expected = {'open','grasp','pinch'} | (set(POSE_CODES)|{'angled_prepare','pointing_prepare','index_prepare','full_prepare','ulnar_prepare','thumb_index_prepare'} if config['schema']==2 else set())
         if set(config['poses'][side]) != expected:
             raise ValueError('hand pose definitions missing')
         for pose in config['poses'][side].values():
@@ -87,6 +88,7 @@ def targets(poses,controls):
         baseline = (poses[side]['angled_prepare'] if mode=='angled_grip' else
                     poses[side]['pointing_prepare'] if mode=='pointing' else
                     poses[side]['index_prepare'] if mode=='index_pinch' else
+                    poses[side]['thumb_index_prepare'] if mode=='thumb_index_pinch' else
                     poses[side]['ulnar_prepare'] if mode=='ulnar_pinch' else
                     poses[side]['full_prepare'] if mode=='full_grip' else poses[side]['open'])
         result.update({name: opened+depth*(closed-opened)
@@ -140,7 +142,7 @@ class SH5HandOutput:
         self.controls = None
         self.rx = -math.inf
         self.previous = {}
-        self.last_trigger = {}  # [ADDED] Per-hand direction; trigger release is never slowed.
+        self.last_trigger = {}  # Trigger closing and spring-back opening are paced.
         self.active = False
         self.last_output = 0.
         node.get_logger().info('[SH5 HAND OUTPUT] '+(
@@ -281,8 +283,8 @@ class SH5HandOutput:
         if self.mode=='controllers' and self.hand_mode==2:
             # Bound every trigger output transition, including thumb prep and
             # tiny trigger reversals. Direction comes from remaining joint
-            # travel, not noisy trigger derivatives. Release remains faster,
-            # but never jumps directly to a distant target.
+            # travel, not noisy trigger derivatives. Opening stays paced even
+            # when a released physical trigger springs directly back to zero.
             dt = now-self.last_output if self.active else .01
             for side,item in self.controls.items():
                 if item['grip'] > .05:
@@ -291,6 +293,7 @@ class SH5HandOutput:
                 baseline_name = {'angled_grip':'angled_prepare',
                                  'pointing':'pointing_prepare',
                                  'index_pinch':'index_prepare',
+                                 'thumb_index_pinch':'thumb_index_prepare',
                                  'full_grip':'full_prepare',
                                  'ulnar_pinch':'ulnar_prepare'}.get(pose,'open')
                 baseline = self.poses[side][baseline_name]
@@ -299,7 +302,7 @@ class SH5HandOutput:
                 for i,name in enumerate(FINGER_NAMES[side]):
                     old = self.previous.get(name,measured[name])
                     opening = (desired[name]-old)*(closed[i]-baseline[i]) < -1e-9
-                    scale = 1.0 if opening else MODE2_TRIGGER_CLOSE_SPEED_SCALE
+                    scale = MODE2_TRIGGER_OPEN_SPEED_SCALE if opening else MODE2_TRIGGER_CLOSE_SPEED_SCALE
                     paced[name] = dict(self.limits[name],velocity=self.limits[name]['velocity']*scale)
                 output.update(slew_aux({n:desired[n] for n in FINGER_NAMES[side]},
                                        self.previous,measured,paced,dt))

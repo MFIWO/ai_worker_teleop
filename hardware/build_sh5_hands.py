@@ -132,7 +132,7 @@ def patched_source(text):
         text = replace_once(text,
             f'    weight_{side}_elbow.head(3).setConstant(weight_elbow_position_);',
             f'    weight_{side}_elbow.head(3).setConstant(\n'
-            '      body_elbows_relaxed_.load() ? 0.05 : weight_elbow_position_);')
+            '      0.0);  // Elbow task cost disabled both stationary and moving.')
     return text
 
 

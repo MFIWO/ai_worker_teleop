@@ -8,7 +8,7 @@ import time
 
 from hardware.loop_vr_contract import RecordingStatus, vr_parameters
 from hardware.loop_clock import PCRecordingClock,SplitRobotStreamer
-from hardware.hx5_tactile import HAND_MODEL,PRESSURE_TOPICS,TactileReadings
+from hardware.hx5_tactile import HAND_MODEL,PRESSURE_TOPICS,TactileReadings,dynamic_hand_message
 
 
 def main():
@@ -118,6 +118,10 @@ def main():
             self.get_logger().info('VR continuous recording: HOLD never stops data/camera transmission. No recording API calls.')
 
         def _init_tactile_subscribers(self):
+            from control_msgs.msg import DynamicJointState
+            self._typed_tactile_rx = {}
+            self._dynamic_tactile_sub = self.create_subscription(
+                DynamicJointState, '/dynamic_joint_states', self.receive_dynamic_tactile, self._qos)
             try:
                 from robotis_interfaces.msg import HandPressures
             except ImportError:
@@ -132,6 +136,20 @@ def main():
                 f'[{HAND_MODEL}] Loop fingerType={HAND_MODEL}; subscribing to '+', '.join(PRESSURE_TOPICS.values()))
 
         def receive_tactile(self, side, msg):
+            if self._accept_tactile(side,msg):
+                self._typed_tactile_rx[side] = time.monotonic()
+
+        def receive_dynamic_tactile(self, msg):
+            for side in PRESSURE_TOPICS:
+                if time.monotonic()-self._typed_tactile_rx.get(side,-float('inf'))<=.5:
+                    continue
+                try:
+                    pressure = dynamic_hand_message(side,msg)
+                except ValueError:
+                    continue  # absent interfaces never become fabricated zero samples
+                self._accept_tactile(side,pressure)
+
+        def _accept_tactile(self, side, msg):
             accepted = self.tactile.receive(side,msg,time.monotonic())
             error = self.tactile.errors[side]
             previous = self._tactile_reported.get(side)
@@ -142,6 +160,7 @@ def main():
                     self.get_logger().info(f'[{HAND_MODEL}] {side}: valid 5x3x3 raw tactile received')
                 else:
                     self.get_logger().warning(f'[{HAND_MODEL}] {side}: invalid tactile omitted: {error}')
+            return accepted
 
         def _load_robot_config(self):
             super()._load_robot_config()
@@ -203,16 +222,17 @@ def main():
             if receipt is not None and 0<=now-receipt<=.5:
                 raw_state=self.recording_status.intent.get('hand_pose_state')
                 if (isinstance(raw_state,list) and len(raw_state)==4 and all(type(v) is int for v in raw_state)
-                        and raw_state[0] in (1,2) and 0<=raw_state[1]<=4
-                        and all(0<=v<=5 for v in raw_state[2:])):
+                        and raw_state[0] in (1,2) and 0<=raw_state[1]<=7
+                        and all(0<=v<=7 for v in raw_state[2:])):
                     state=[float(v) for v in raw_state]
             payload[f'{self.robot_type}.teleop.hand_pose_state']=state
             if self.enable_tactile and self._tick_count and self._tick_count % max(1,int(self.fps*10)) == 0:
                 for side,receipt in self.tactile.receipts.items():
                     if receipt is None or now-receipt > self.tactile.freshness:
                         self.get_logger().warning(
-                            f'[{HAND_MODEL}] {side}: tactile missing/stale on {PRESSURE_TOPICS[side]}; '
-                            'pressure is absent in Loop, not a zero reading')
+                            f'[{HAND_MODEL}] {side}: tactile missing/stale on {PRESSURE_TOPICS[side]} '
+                            'and /dynamic_joint_states; no fabricated pressure is sent. '
+                            'HX5-D20 becomes selectable after both hands have valid samples.')
             anchor_age=(-1. if self.recording_clock.last_receipt is None else now-self.recording_clock.last_receipt)
             skew=(-1. if self.recording_clock.anchor is None else time.time()-self.recording_clock.anchor-now)
             payload[f'{self.robot_type}.teleop.clock']=[anchor_age,skew]

@@ -33,7 +33,7 @@ def parser():
     p.add_argument('--input',choices=('hands','controllers'),default='hands')
     p.add_argument('--hand-mode',choices=('1','2'),default='1',help='hands: 1=Cyclo original, 2=xr_ai_teleop HX5 DexPilot; controllers: 1=trigger/grip, 2=button-selected poses')
     p.add_argument('--bringup',action='store_true',help='robot: start missing router/follower without native initialization; raise only arms over five seconds')
-    p.add_argument('--ready-pose',action='store_true',help='robot: five-second arms-only ready motion before VR starts')
+    p.add_argument('--ready-pose',action='store_true',help='robot: lift to physical top, then five-second arm ready motion before VR starts')
     p.add_argument('--loop-no-camera',action='store_true')
     # CHANGED(2026-10-28): Robot-side Loop recorder selection, not motion control.
     p.add_argument('--loop-channels',default='training',help='training | qpos | all | comma-separated channel keys')

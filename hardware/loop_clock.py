@@ -162,8 +162,9 @@ class SplitRobotStreamer:
 
     def connect(self):
         try:
-            for stream in self.streams:
-                stream.connect()
+            # A declared empty tactile source can be selected in Preview but
+            # cannot supply the first frame needed for recording readiness.
+            self.robot.connect()
         except Exception:
             self.close()
             raise
@@ -174,6 +175,13 @@ class SplitRobotStreamer:
             return False
         self.robot.send(payload, stamp=stamp)
         if self.tactile is not None:
+            if self.tactile.producer is None:
+                ready = all(payload.get(f'ffw_sh5_vr.observation.{s}_hand.tactile_pressure') is not None
+                            for s in HAND_SIDES)
+                if not ready:
+                    return True
+                self.tactile.connect()
+            self.tactile.sent_count=self.robot.sent_count-1
             self.tactile.send(payload, stamp=stamp)
         return True
 

@@ -338,8 +338,8 @@ def main():
         # so a fresh, disarmed PC session can reconnect and explicitly resume.
         follower=any(Path(argv[0]).name=='ros2_control_node' for argv in processes())
         if not follower:
-            if not args.bringup:raise RuntimeError('Follower absent; --bringup starts SH5 without native initialization, then raises only the arms over five seconds')
-            print('[BRINGUP] SH5 follower init_position:=false; then five-second arms-only ready motion. No hand initialization trajectory.',flush=True)
+            if not args.bringup:raise RuntimeError('Follower absent; --bringup starts SH5 without native initialization, then raises lift to its physical top before the five-second arm ready pose')
+            print('[BRINGUP] SH5 follower init_position:=false; then lift-to-top and five-second arm ready motion. No hand initialization trajectory.',flush=True)
             # Preserve the expected mapping even if launch is interrupted
             # before /robot_description is published. No ROS node/motion here.
             from ament_index_python.packages import get_package_share_directory
@@ -381,14 +381,14 @@ def main():
         if any('leader' in name.lower() and name.endswith('controller_manager') for name in nodes):
             raise RuntimeError('Physical leader must be stopped for VR mode')
         if not follower or args.ready_pose:
-            mover=start([sys.executable,'-m','hardware.ready_pose','--model','sh5','--duration','5'])
-            children.append(('arms-only ready',mover))
+            mover=start([sys.executable,'-m','hardware.ready_pose','--model','sh5','--duration','5','--lift-first'])
+            children.append(('lift then arms ready',mover))
             while mover.poll() is None:
                 if any(p is not mover and p.poll() is not None for _,p in (*services,*children)):
                     raise RuntimeError('Follower/router/PC session exited during arm ready motion')
                 time.sleep(.1)
             if mover.returncode:raise RuntimeError('Five-second arm ready motion failed; VR remains stopped')
-            children.remove(('arms-only ready',mover))
+            children.remove(('lift then arms ready',mover))
         if args.loop=='vr' and not args.loop_no_camera:
             if not {'head_left_jpeg','head_right_jpeg'}&nodes:
                 loader=start(['ros2','launch','ffw_loop_streamer','head_jpeg.launch.py','jpeg_quality:=75'])
@@ -420,7 +420,7 @@ def main():
         release_at=time.monotonic()+3.
         # Stop command production first, before waiting for camera/SDK teardown.
         for name,process in children:
-            if name not in ('controller','arms-only ready') or process.poll() is not None:continue
+            if name not in ('controller','arms-only ready','lift then arms ready') or process.poll() is not None:continue
             try:os.killpg(process.pid,signal.SIGINT)
             except ProcessLookupError:pass
         for name,process in reversed(children):

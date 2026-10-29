@@ -127,36 +127,36 @@ class HandMotionTests(unittest.TestCase):
                 for last in pair:
                     with self.subTest(pair=pair,first=first,last=last):
                         modes=ControllerHandModes()
-                        modes.selected='ulnar_pinch'
+                        modes.selected='thumb_index_pinch'
                         for i,pressed in enumerate((first,pair,last,'','','')):
                             states={'left':{},'right':{}}
                             for key in pressed:
                                 side,name=keys[key]
                                 states[side][name]=True
                             self.assertIsNone(modes.buttons(states['left'],states['right'],now=i*.1))
-                        self.assertEqual(modes.selected,'ulnar_pinch')
+                        self.assertEqual(modes.selected,'thumb_index_pinch')
 
     def test_nonoverlapping_chord_events_cancel_pending_tap(self):
         modes=ControllerHandModes()
-        modes.selected='ulnar_pinch'
+        modes.selected='thumb_index_pinch'
         modes.buttons({'aButton':True},{},now=0.)
         modes.buttons({},{},now=.01)  # transient all-up before opposite event
         modes.buttons({},{'aButton':True},now=.08)
         modes.buttons({},{},now=.1)
         self.assertIsNone(modes.buttons({},{},now=.4))
-        self.assertEqual(modes.selected,'ulnar_pinch')
+        self.assertEqual(modes.selected,'thumb_index_pinch')
 
     def test_single_tap_waits_for_quiet_interval_and_reset_cancels(self):
         modes=ControllerHandModes()
         modes.buttons({'bButton':True},{},now=0.)
         self.assertIsNone(modes.buttons({},{},now=.1))
         self.assertIsNone(modes.buttons({},{},now=.2))
-        self.assertEqual(modes.buttons({},{},now=.3),('Y','ulnar_pinch'))
+        self.assertEqual(modes.buttons({},{},now=.3),('Y','thumb_index_pinch'))
         modes.buttons({},{'bButton':True},now=.4)
         modes.buttons({},{},now=.5)
         modes.reset_buttons()
         self.assertIsNone(modes.buttons({},{},now=1.))
-        self.assertEqual(modes.selected,'ulnar_pinch')
+        self.assertEqual(modes.selected,'thumb_index_pinch')
 
     def test_late_single_button_tail_after_chord_is_ignored(self):
         modes=ControllerHandModes()
@@ -168,7 +168,7 @@ class HandMotionTests(unittest.TestCase):
         self.assertEqual(modes.selected,'full_grip')
 
     def test_A_X_Y_select_requested_finger_poses(self):
-        for button,expected in (('A','pointing'),('X','index_pinch'),('Y','ulnar_pinch')):
+        for button,expected in (('A','pointing'),('X','index_pinch'),('Y','thumb_index_pinch')):
             modes=ControllerHandModes()
             left,right=({'aButton':True}, {}) if button=='X' else (({'bButton':True}, {}) if button=='Y' else ({}, {'aButton':True}))
             modes.buttons(left,right,now=0.)
@@ -238,7 +238,7 @@ class HandMotionTests(unittest.TestCase):
         modes.buttons({},{},now=.2)
         result=modes.controls({'left':dict(trigger=1.,grip=0.),'right':dict(trigger=0.,grip=0.)})
         self.assertEqual(result['left']['pose'],'full_grip')
-        self.assertEqual(result['right']['pose'],'ulnar_pinch')
+        self.assertEqual(result['right']['pose'],'thumb_index_pinch')
 
     def test_sh5_lift_available_in_both_modes(self):
         from hardware.controller_stick_motion import lift_target

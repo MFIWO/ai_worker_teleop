@@ -41,14 +41,15 @@ bash teleop.sh robot --pc-ip 192.0.2.10 --robot-ip 192.0.2.20 --loop vr --input 
 
 `--bringup` starts a missing Zenoh router and SH5 follower with
 `init_position:=false`. The native hand/head/lift/steering initialization
-trajectories are skipped. Once stable feedback is available, only the two
-seven-joint arms follow the existing xr_tele quintic ready trajectory over five
+trajectories are skipped. Once stable feedback is available, the lift first moves to the physical URDF
+upper bound (0.0m on this SH5), at a peak speed no greater than 0.12m/s. Only
+after measured top position and stop are verified do the two seven-joint arms follow the existing xr_tele quintic ready trajectory over five
 seconds, to `[0,0,0,-1.57,0,0,0]` per arm. No hand position trajectory is sent
 by this ready mover. Native driver initialization and the follower's existing
 hand current commands still run; this option does not turn hand torque off.
 This is a startup action, not part of HOLD/resume. An existing follower is
 reused without motion; add `--ready-pose` to the **robot** command to request
-the same arms-only move explicitly. Stop old initialization executors and VR
+the same lift-then-arms startup sequence explicitly. Stop old initialization executors and VR
 controllers first. Motion failure prevents the VR controller from starting.
 Without `--bringup`, router and follower must already run.
 
@@ -131,55 +132,24 @@ from open to the original grasp (0..1). Grip retains the existing proportional
 thumb/index/middle tripod pinch, with ring/little open, and has priority over
 trigger. Face buttons retain the existing AX/BY session chords.
 
-### Hand mode 2: A/B pinches, left-grip arm clutch, right-grip ready recovery
+### Hand mode 2: finger presets and independent arm grips
 
-Pass `--input controllers --hand-mode 2` on **both** PC and robot commands.
-This changes ONLY the explicit SH5 controller hand mode 2; controller hand mode 1
-and optical input retain their original finger behavior.
+Use `--input controllers --hand-mode 2` on both sessions.
 
-| Controller input | Mode-2 behavior |
+| Input | Behavior |
 |---|---|
-| X tap (left A button) | Trigger = original full grip |
-| Y tap (left B button) | Trigger = original C-shape angled entry/grip |
-| A tap (right A button) | Trigger = **thumb + index + middle** tripod pinch; thumb joints 3/4 bend farther than former Y pose |
-| B tap (right B button) | Trigger = **thumb + ring + little** ulnar pinch; index/middle remain open |
-| Left grip held | **Clutch arms ON**: both wrists follow controllers while grip is held |
-| Left grip released | **Clutch arms HOLD**: controller hand displacement no longer drives wrists, but measured lift displacement still carries arms up/down |
-| Right grip pressed | Request a **both-arm initial ready pose**; stops arm teleop and invokes the robot-owned recovery action, then a fresh Cyclo restart |
-| A+X after ready recovery | Release both grips and A/X first, then press **A+X** to capture both real wrists and current VR zero; hold left grip to resume arm teleop |
-| Y+B | Existing full HOLD command (both buttons); does not select B pinch |
-| Both stick clicks | Toggle the existing HEAD and MOBILE joystick modes |
+| X | Existing thumb/index/middle grasp path |
+| Y | Thumb/index pinch; middle/ring/little stay open |
+| A | Pointing |
+| B | Existing supervised arm ready recovery |
+| Left grip | Left arm follows while held; release holds, repress reanchors that side |
+| Right grip | Same independent clutch for the right arm; no global recalibration |
+| A+X / B+Y | Global start/resume / HOLD |
 
-Mode-2 grips **never command pinch**; only selected trigger profiles close
-fingers. Each side captures the current preset when its trigger starts closing,
-retains it while held, and releases it at zero trigger. A solo face-button tap
-commits only after 150 ms of quiet release; A+X and B+Y start/stop chords and
-partial releases never select a hand pose. Mode 1 still uses proportional grip
-for thumb/index/middle pinch.
-
-A and B pinch poses start with a measured **thumb preparation stage**, then
-close the selected fingers through the existing 85%-of-URDF velocity cap and
-60 ms controller target smoothing. All new thumb/pinch joint angles are
-**simulation candidates**, not verified human-robot pinch contacts. Validate
-fingertip spacing, self-collision and grasp pressure in PhysX and tune
-`hardware/hx5_controller_poses.json` before a physical pinch test.
-
-**Right-grip ready recovery requires the new robot launcher.** The PC disarms
-first and waits for an explicit fresh gate acknowledgement. The robot launcher
-then stops the old Cyclo/gate process group **before** executing the existing
-five-second arms-only `hardware.ready_pose` action and starts a new Cyclo/gate
-process group afterward. It reports `READY` only after the new gate provides
-fresh healthy disarmed feedback. A+X remains blocked during recovery, and
-failure stays disarmed; inspect session logs instead of repeatedly forcing
-motion. The original SH5 follower remains running; the recovery does not move
-lift, head, mobile base, or fingers.
-
-The lift-follow correction is shared by optical and controller input. It uses
-**measured** `lift_joint` feedback to move the two wrist targets, their
-elbow/workspace hints and calibration anchors by the same vertical displacement;
-it does not apply the command target twice or change VR orientation zero.
-In mode 2, releasing the left grip freezes XR relative motion, **not** the
-lift/body frame, so lowering lift carries the hands downward.
+Closing and opening are velocity limited, including abrupt trigger release.
+Base/lift motion no longer disables gripped arm inputs. Elbow task weight is
+zero both stationary and moving; collision and measured tracking checks remain.
+B recovery retains the arms-only action and does not raise lift.
 
 SH5 right-stick functions are exclusive: HEAD mode controls lift with vertical
 stick travel; MOBILE mode controls base yaw with horizontal travel and ignores
@@ -526,3 +496,14 @@ The reference `external_repos/loop` predates the on-robot stereo head JPEG and
 driver-side wrist rotation changes. Its whole package must not replace the
 installed robot package. Loop application binaries and its recording engine
 are not patched; this is an additive source and input bridge.
+
+### Tactile readiness and missing broadcaster fallback
+
+If HandPressures is absent, the Loop adapter reads the named 5x9 pressure
+interfaces from `/dynamic_joint_states`. Both paths validate raw integer values
+0..255; missing interfaces are not zero-filled. The typed HX5-D20 source is
+registered only after both hands supply valid pressure frames, preventing an
+empty source from being selected as a recording requirement. Robot frames keep
+streaming independently. After source registration, missing/stale hand samples
+remain absent. Actual Loop recording must still be verified with the live
+follower; no recording API is invoked by this adapter.

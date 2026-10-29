@@ -6,6 +6,7 @@ order. A pressure value is an unsigned raw count, not a calibrated force.
 """
 from collections import deque
 import math
+from types import SimpleNamespace
 
 
 HAND_MODEL = 'HX5-D20'
@@ -16,6 +17,30 @@ SENSOR_NAMES = {
     for side, letter in (('left', 'l'), ('right', 'r'))
 }
 PRESSURE_NAMES = tuple(f'Present Pressure {i}' for i in range(1, 10))
+
+
+def dynamic_hand_message(side, message):
+    """Read existing exported sensor interfaces; never open a second serial reader."""
+    names, values = message.joint_names, message.interface_values
+    if len(names)!=len(values) or len(names)!=len(set(names)):
+        raise ValueError('invalid DynamicJointState names/interfaces')
+    by_name = dict(zip(names, values))
+    sensors = []
+    for name in SENSOR_NAMES[side]:
+        if name not in by_name:
+            raise ValueError(f'missing exported tactile sensor {name}')
+        interfaces = by_name[name]
+        if len(interfaces.interface_names)!=len(interfaces.values) or len(set(interfaces.interface_names))!=len(interfaces.interface_names):
+            raise ValueError(f'{name}: invalid dynamic interfaces')
+        data = dict(zip(interfaces.interface_names, interfaces.values))
+        pressure = []
+        for key in PRESSURE_NAMES:
+            v = data.get(key)
+            if isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or v!=int(v) or not 0<=v<=255:
+                raise ValueError(f'{name}/{key}: expected raw uint8 reading')
+            pressure.append(int(v))
+        sensors.append(SimpleNamespace(sensor_name=name,pressure_names=list(PRESSURE_NAMES),pressure_values=pressure))
+    return SimpleNamespace(hand_name=side,header=message.header,sensors=sensors)
 
 
 

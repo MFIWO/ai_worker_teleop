@@ -216,16 +216,16 @@ class HardwarePublisherTests(unittest.TestCase):
         self.assertEqual(n.CONTROLLER_ACTIVATION_DELAY, 1.)
         self.assertEqual(n.WARMUP_HOLD_SECONDS, .8)
 
-    def test_SH5_operating_profile_requires_small_nonzero_elbow_weight(self):
+    def test_SH5_operating_profile_requires_zero_elbow_weight(self):
         n=self.node;n.hardware_model='sh5'
         n._hardware_manifest={'urdf':'/test.urdf','srdf':'/test.srdf','arm_limit_policy':'sh5_bent_elbow_v1'}
         from hardware.xr_contract import private_topic
         values=[SimpleNamespace(string_value=s) for s in ('/test.urdf','/test.srdf','','','','arm_r_link7','arm_l_link7',private_topic('sh5','right'),private_topic('sh5','left'))]
-        for i,x in ((2,.1),(3,10.),(4,1.)):values[i]=SimpleNamespace(type=3,double_value=x)
+        for i,x in ((2,0.),(3,10.),(4,1.)):values[i]=SimpleNamespace(type=3,double_value=x)
         values += [SimpleNamespace(type=3,double_value=0.),SimpleNamespace(type=3,double_value=.03)]
         future=SimpleNamespace(result=lambda:SimpleNamespace(values=values))
         n._profile_result(future);self.assertTrue(n._profile_verified)
-        values[2].double_value=0.;n._profile_result(future);self.assertFalse(n._profile_verified)
+        values[2].double_value=.1;n._profile_result(future);self.assertFalse(n._profile_verified)
 
     def test_remote_epoch_joint_samples_are_fresh_only_by_receipt(self):
         n=self.node

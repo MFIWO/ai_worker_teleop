@@ -95,7 +95,7 @@ ROBOT_BUILD
 # 5. 맨손 mode 1 + Loop — PC 호스트 터미널 두 개
 # ============================================================
 # 먼저 PC Loop 앱을 엽니다. 각 터미널에서 PC_IP/ROBOT_IP/TELEOP_REPO를 설정하세요.
-# 터미널 1: 로봇 세션. --bringup은 팔만 5초 준비 자세 이동; 손 초기화 궤적 없음.
+# 터미널 1: 로봇 세션. --bringup은 lift를 물리 상단으로 올린 뒤 팔을 5초 준비 자세 이동; 손 초기화 궤적 없음.
 bash "$TELEOP_REPO/teleop.sh" robot \
   --pc-ip "$PC_IP" --robot-ip "$ROBOT_IP" \
   --loop vr --input hands --hand-mode 1 --bringup
@@ -124,11 +124,13 @@ bash "$TELEOP_REPO/teleop.sh" pc \
 # A+X: 시작·재개. [XR RESUME READY]까지 컨트롤러를 가만히 유지.
 # B+Y: HOLD. mode 2는 마지막 손 목표를 유지.
 # 왼쪽 grip: 누르는 동안 왼팔 추종, 놓으면 유지. 오른팔은 활성화 후 추종.
-# 오른쪽 grip: ACTIVE에서 현재 기준 재캘리브레이션.
+# 오른쪽 grip: 누르는 동안 오른팔 추종, 놓으면 유지. 다시 누르면 현재 입력에서 재개.
 # B 단독: 팔 준비 자세 복귀 요청. 완료 로그 후 A+X로 수동 재개.
 # A 단독: pointing. Trigger에 따라 검지 유지 전류 한도 증가(기존 300 raw 이내).
 # X 단독: 원래 mode 1 grip pinch 궤적. 엄지 25%, 검지·중지 15% 굽힌 상태에서 시작.
-# Y 단독: 엄지·약지·새끼 함께 닫힘. 엄지 방향 고정, 굽힘 관절만 Trigger 비례 동작.
+# Y 단독: 엄지·검지만 pinch. 중지·약지·새끼는 열린 상태 유지.
+# Trigger를 갑자기 놓아도 손은 속도 제한을 따라 천천히 열림.
+# 팔꿈치 QP 가중치는 정지/이동 모두 0. 이동 중에도 grip을 누른 팔은 추종.
 # 오른쪽 stick: lift + MOBILE 회전을 대각선으로 동시에 입력 가능.
 # 양쪽 stick 클릭: HEAD/MOBILE 전환. 왼쪽 head/mobile 축 선택 정책 유지.
 # 변경된 Y pose JSON은 robot 설치 + 세션 재시작으로 반영(C++ 재빌드 불필요).
@@ -163,3 +165,7 @@ TRACE_BUILD
 # FileNotFoundError: hand_write_manifest.json -> 3번 설치 후 4번 빌드·검증.
 # another writer -> 기존 Vuer/Cyclo 팔 publisher 종료; Cyclo arm:=false 확인.
 # 지연 조사 원본은 과거 기록이며, 2026-10-29 사용자가 현재 환경 지연 해결을 확인했습니다.
+
+# 추가 수정 반영: PC install + robot 소스 재배포 후 SH5 C++ --rebuild 필요.
+# HX5-D20 촉각 소스는 양손 실제 압력 데이터가 들어온 뒤에만 Loop에 등록됨.
+# HandPressures broadcaster가 없으면 /dynamic_joint_states의 센서 인터페이스를 사용.
