@@ -5,9 +5,11 @@ Left grip enables left-arm tracking while held and reanchors left only.
 Right grip reanchors current controller inputs while ACTIVE.
 B requests the robot-owned ready supervisor; A+X manually resumes after ready.
 
-A: pointing. After bounded entry, index goal remains at the configured pose
-while trigger is held. Index current ceiling150..300 raw follows trigger;
-other motor ceilings retain stock300. Physical stiffness is not guaranteed.
+A: [CHANGED 2026-10-29] Historical thumb_out_grip restored from main e321ba8.
+On trigger, preposition the measured thumb first while holding all four finger
+groups at their measured targets; then close the index/middle/ring/little
+fingers with trigger depth and the existing 25% velocity cap. The 8-second
+thumb arrival timeout remains fail-closed. Fingertip contact is not certified.
 
 X: original mode1 grip-pinch path for thumb/index/middle, including original
 spread/roll. Starts25% along the thumb path and15% along index/middle paths.

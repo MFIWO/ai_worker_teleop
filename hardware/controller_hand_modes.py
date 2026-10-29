@@ -1,8 +1,8 @@
 """Controller preset selection; no ROS or hardware side effects."""
 import time
 
-POSE_BUTTONS = {'X':'index_pinch','Y':'thumb_index_pinch','A':'pointing','B':'ready_pose'}
-POSE_CODES = {'full_grip':1,'angled_grip':2,'tripod_deep':3,'ulnar_pinch':4,'index_pinch':5,'pointing':6,'thumb_index_pinch':7}
+POSE_BUTTONS = {'X':'index_pinch','Y':'thumb_index_pinch','A':'thumb_out_grip','B':'ready_pose'}  # [CHANGED 2026-10-29] Restore historical A thumb-first four-finger grasp.
+POSE_CODES = {'full_grip':1,'angled_grip':2,'tripod_deep':3,'ulnar_pinch':4,'index_pinch':5,'pointing':6,'thumb_index_pinch':7,'thumb_out_grip':8}  # [ADDED] Keep old pose IDs stable.
 BUTTON_RELEASE_GRACE = .15
 
 
