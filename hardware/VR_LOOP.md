@@ -140,12 +140,13 @@ Use `--input controllers --hand-mode 2` on both sessions.
 |---|---|
 | X | Existing thumb/index/middle grasp path |
 | Y | Thumb/index pinch; middle/ring/little stay open |
-| A | Pointing |
+| A | Restored historical thumb-first four-finger grasp (thumb-out target, then four fingers close with trigger) |
 | B | Existing supervised arm ready recovery |
 | Left grip | Left arm follows while held; release holds, repress reanchors that side |
 | Right grip | Same independent clutch for the right arm; no global recalibration |
 | A+X / B+Y | Global start/resume / HOLD |
 
+A starts by moving the thumb toward its historical opposition target while preserving the other four fingers' measured poses until the thumb arrives; only then may trigger closure proceed. The existing 8-second preparation timeout still fails closed if measured thumb arrival never occurs. This restores the old A pose but does not prove four fingertip contacts or self-collision clearance.
 Closing and opening are velocity limited, including abrupt trigger release.
 Base/lift motion no longer disables gripped arm inputs. Elbow task weight is
 zero both stationary and moving; collision and measured tracking checks remain.
