@@ -109,7 +109,7 @@ class SH5HandsHardwarePublisher(HardwareXRPublisher):
             self.get_logger().info('[STICKS] Initial HEAD mode: left=head, right up/down=lift. Both stick clicks toggle MOBILE: left=translation, right left/right=yaw, right up/down=lift. Requires ACTIVE.')
             self.get_logger().info(f'[HAND MODE {self._hand_mode}] '+(
                 'Original proportional trigger grasp; grip=thumb/index/middle pinch.' if self._hand_mode==1 else
-                'Tap X=thumb/index/middle C-grip, Y=thumb/index pinch, A=pointing, B=arm ready. Each grip enables its own arm while pressed.'))
+                'Tap X=thumb/index/middle C-grip, Y=thumb/index pinch, A=thumb-out four-finger grasp, B=arm ready. [CHANGED 2026-10-29] Each grip enables its own arm while pressed.'))
         elif self._hand_mode==2:
             self.get_logger().info('[SH5 HANDS MODE 2] Fingers use xr_ai_teleop HX5 DexPilot; 25-point HAND_MOVE input, no BODY resampling. Existing arm path retained.')
         else:
