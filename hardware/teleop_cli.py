@@ -12,6 +12,12 @@ import subprocess
 import sys
 import time
 
+# teleop.sh executes this file directly on the host, outside the ROS package path.
+if __package__:
+    from hardware.aux_controls import mobile_speed, BASE_LIMITS
+else:
+    from aux_controls import mobile_speed, BASE_LIMITS
+
 
 def ipv4(value):
     try:return str(ipaddress.IPv4Address(value))
@@ -24,6 +30,16 @@ def hostname(value):
     return value
 
 
+def base_speed(value):
+    try:return mobile_speed(value, BASE_LIMITS[0])
+    except ValueError as error:raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def turn_speed(value):
+    try:return mobile_speed(value, BASE_LIMITS[2])
+    except ValueError as error:raise argparse.ArgumentTypeError(str(error)) from error
+
+
 def parser():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('side',choices=('pc','robot'))
@@ -32,8 +48,10 @@ def parser():
     p.add_argument('--loop',choices=('off','vr'),default='off')
     p.add_argument('--input',choices=('hands','controllers'),default='hands')
     p.add_argument('--hand-mode',choices=('1','2'),default='1',help='hands: 1=Cyclo original, 2=xr_ai_teleop HX5 DexPilot; controllers: 1=trigger/grip, 2=button-selected poses')
-    p.add_argument('--bringup',action='store_true',help='robot: start missing router/follower without native initialization; raise only arms over five seconds')
+    p.add_argument('--bringup',action='store_true',help='robot: start missing router/follower; lift to top, then five-second arm ready motion')
     p.add_argument('--ready-pose',action='store_true',help='robot: lift to physical top, then five-second arm ready motion before VR starts')
+    p.add_argument('--base-speed',type=base_speed,default=.2,help='robot: maximum joystick XY speed in m/s (0..0.2)')
+    p.add_argument('--turn-speed',type=turn_speed,default=1/3,help='robot: maximum joystick yaw speed in rad/s (0..0.333333)')
     p.add_argument('--loop-no-camera',action='store_true')
     # CHANGED(2026-10-28): Robot-side Loop recorder selection, not motion control.
     p.add_argument('--loop-channels',default='training',help='training | qpos | all | comma-separated channel keys')
@@ -56,6 +74,7 @@ def command(args,interactive):
            '--pc-ip',args.pc_ip,'--robot-ip',args.robot_ip,'--loop',args.loop,'--input',args.input,'--hand-mode',args.hand_mode,'--host-lease']
     if args.bringup:inner.append('--bringup')
     if args.ready_pose:inner.append('--ready-pose')
+    inner.extend(['--base-speed',str(args.base_speed),'--turn-speed',str(args.turn_speed)])
     if args.loop_no_camera:inner.append('--loop-no-camera')
     if args.loop=='vr':
         inner.extend(['--loop-channels',args.loop_channels])
@@ -68,9 +87,10 @@ def main():
     p=parser()
     args=p.parse_args()
     if args.side=='pc' and (args.bringup or args.loop_no_camera or args.ready_pose or args.hand_trace or
-                            args.loop_no_tactile or args.loop_channels!='training'):
+                            args.loop_no_tactile or args.loop_channels!='training' or
+                            args.base_speed!=.2 or args.turn_speed!=1/3):
         p.error('--bringup, --ready-pose, --loop-no-camera, --loop-no-tactile, '
-                '--loop-channels and --hand-trace apply to the robot command')
+                '--loop-channels, --hand-trace, --base-speed and --turn-speed apply to the robot command')
     cmd=command(args,sys.stdin.isatty())
     if args.dry_run:
         print(shlex.join(cmd))

@@ -45,6 +45,45 @@ def age(now, receipt):
     return -1. if receipt is None else max(0., now-receipt)
 
 
+def recording_payload(payload, robot_type, status):
+    """Pin numeric columns from the first tick, including during HOLD.
+
+    Loop pins Parquet columns from non-null fields in its first batch. None
+    fields appearing later abort recording with 'columns changed'. Unknown
+    observations use NaN and validity flags. Non-valid joint actions use the
+    current measured hold position. This never publishes a robot command.
+    """
+    result = dict(payload)
+    prefix = robot_type + '.'
+    action_valid = list(status['action_valid'])
+    observation_valid = []
+    for index, (name, joints) in enumerate(GROUPS.items()):
+        channel = 'velocity' if name == 'mobile' else 'joint_position'
+        observation = prefix + f'observation.{name}.{channel}'
+        action = prefix + f'action.{name}.{channel}'
+        measured = result.get(observation)
+        valid = measured is not None and len(measured) == len(joints) and all(map(math.isfinite, measured))
+        observation_valid.append(float(valid))
+        if not valid:
+            measured = [math.nan] * len(joints)
+        result[observation] = list(measured)
+        commanded = result.get(action)
+        if (not action_valid[index] or commanded is None or len(commanded) != len(joints)
+                or not all(map(math.isfinite, commanded))):
+            action_valid[index] = 0.
+            commanded = [0.] * len(joints) if name == 'mobile' else measured
+        result[action] = list(commanded)
+    result[prefix + 'teleop.action_valid'] = action_valid
+    result[prefix + 'teleop.observation_valid'] = observation_valid
+    optional = {'teleop.controller_inputs': 4, 'teleop.hand_pose_state': 4}
+    optional.update({f'observation.{side}_hand.tactile_pressure': 45 for side in ('left', 'right')})
+    for key, size in optional.items():
+        full = prefix + key
+        if full in result and result[full] is None:
+            result[full] = [math.nan] * size
+    return result
+
+
 class RecordingStatus:
     def __init__(self):
         self.gate, self.intent = {}, {}

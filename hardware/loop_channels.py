@@ -1,7 +1,7 @@
 """Choose the channels declared on the *single* aiworker Robot State source.
 
-The tactile sample stream has its own Loop source; pressure is never a robot
-state channel. This module has no ROS, SDK, network, or hardware dependency.
+The typed tactile source is also mirrored as numeric pressure observations
+for the joint/pressure Parquet export. No ROS, SDK, network or hardware here.
 """
 
 # CHANGED(2026-10-28): Single-source, schema-level training channel selection.
@@ -11,9 +11,9 @@ PRESETS = ("training", "qpos", "all")
 def select_robot_channels(channel_infos, robot_type, selection="training"):
     """Return declared full channel keys in mapper order, or fail before connect.
 
-    training: measured/commanded joint positions plus HOLD/action-valid masks.
+    training: joint positions, numeric pressure/status and validity masks.
     qpos: only measured joint positions (including all configured hands).
-    all: every non-tactile robot channel, including optional diagnostics.
+    all: every robot channel, including optional diagnostics.
     custom: comma-separated exact keys, with or without '<robot_type>.' prefix.
     """
     if not isinstance(selection, str) or not selection.strip():
@@ -26,8 +26,6 @@ def select_robot_channels(channel_infos, robot_type, selection="training"):
         if not full.startswith(prefix):
             raise ValueError(f"unexpected robot channel outside {robot_type}: {full}")
         relative = full[len(prefix):]
-        if ".tactile_" in relative or relative.endswith(".tactile_pressure"):
-            continue  # pressure belongs solely to the typed HX5-D20 source
         if relative in declared:
             raise ValueError(f"duplicate Loop robot channel: {full}")
         declared[relative] = full
@@ -36,7 +34,8 @@ def select_robot_channels(channel_infos, robot_type, selection="training"):
         chosen = {key for key in declared if (
             key.endswith(".joint_position") and
             (key.startswith("observation.") or key.startswith("action."))
-            or key in ("teleop.flags", "teleop.action_valid")
+            or key.endswith(('.tactile_pressure', '.tactile_status'))
+            or key in ("teleop.flags", "teleop.action_valid", "teleop.observation_valid")
         )}
     elif selection == "qpos":
         chosen = {key for key in declared

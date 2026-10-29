@@ -26,7 +26,8 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from geometry_msgs.msg import Twist
-from hardware.aux_controls import AUX_TOPICS, JOINT_GROUPS, GRIPPERS, validate_aux, slew_aux
+from hardware.aux_controls import (AUX_TOPICS, JOINT_GROUPS, GRIPPERS, validate_aux, slew_aux,
+                                   BASE_LIMITS, mobile_speed, scale_base_command)
 
 from hardware.xr_contract import (
     ARM_NAMES, SIDES, FOLLOWER_TOPICS, GATE_NAME, PC_NAME, LEASE_SECONDS,
@@ -55,6 +56,10 @@ class HardwareCommandGate(Node):
         super().__init__(GATE_NAME)
         self.profile['hand_input'] = os.environ.get('AI_WORKER_SH5_INPUT','hands')
         self.profile['hand_mode'] = int(os.environ.get('AI_WORKER_SH5_HAND_MODE','1'))
+        self.base_speed = mobile_speed(os.environ.get('AI_WORKER_BASE_SPEED', '.2'), BASE_LIMITS[0])
+        self.turn_speed = mobile_speed(os.environ.get('AI_WORKER_TURN_SPEED', str(1/3)), BASE_LIMITS[2])
+        self.profile['base_speed_m_s'] = self.base_speed
+        self.profile['turn_speed_rad_s'] = self.turn_speed
         if self.profile['hand_mode'] not in (1,2):
             raise ValueError('hand mode must be 1 or 2')
         if self.profile['model']=='sh5' and self.profile.get('finger_limits'):
@@ -363,7 +368,7 @@ class HardwareCommandGate(Node):
             publisher.publish(msg)
         if self.base_pub is not None:
             msg = Twist()
-            msg.linear.x, msg.linear.y, msg.angular.z = base
+            msg.linear.x, msg.linear.y, msg.angular.z = scale_base_command(base, self.base_speed, self.turn_speed)
             self.base_pub.publish(msg)
         self.aux_active = bool(joints or any(base))
 

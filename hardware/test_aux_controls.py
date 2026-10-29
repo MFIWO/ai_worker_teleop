@@ -1,10 +1,19 @@
 """Validate restored SG2 controls without ROS or motors."""
 import math
 import unittest
-from hardware.aux_controls import read_aux_limits, validate_aux, slew_aux
+from hardware.aux_controls import read_aux_limits, validate_aux, slew_aux, scale_base_command
 
 
 class AuxiliaryTests(unittest.TestCase):
+    def test_robot_speed_selection_scales_both_xy_axes_and_yaw(self):
+        for base in ([.2,0.,0.], [0.,-.2,0.], [0.,0.,1/3]):
+            selected = scale_base_command(base, .1, 1/6)
+            for actual, original in zip(selected, base):
+                self.assertAlmostEqual(actual, original / 2)
+        self.assertEqual(scale_base_command([.2,.2,1/3],0.,0.),[0.,0.,0.])
+        for linear,yaw in ((-.01,.2),(.201,.2),(.1,float('nan')),(.1,1.)):
+            with self.assertRaises(ValueError):scale_base_command([0.,0.,0.],linear,yaw)
+
     def setUp(self):
         self.limits=read_aux_limits('<robot>'+''.join(
             f'<joint name="{k}"><limit lower="{lo}" upper="{hi}" velocity="{vel}"/></joint>'

@@ -550,6 +550,19 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self.base_messages[-1].angular.z, 0.)
         self.assertEqual(self.gate.aux_previous,{})
 
+    def test_robot_selected_mobile_speed_reaches_final_cmd_vel_and_hold_still_zeros_it(self):
+        self.enable_auxiliary_fixture()
+        self.gate.base_speed=.1
+        self.gate.turn_speed=.15
+        self.gate.emit_aux({},[.2,-.2,1/3])
+        message=self.base_messages[-1]
+        self.assertAlmostEqual(message.linear.x,.1)
+        self.assertAlmostEqual(message.linear.y,-.1)
+        self.assertAlmostEqual(message.angular.z,.15)
+        self.gate.hold('fixture B+Y')
+        message=self.base_messages[-1]
+        self.assertEqual((message.linear.x,message.linear.y,message.angular.z),(0.,0.,0.))
+
     def test_out_of_bounds_auxiliary_target_stops_gate(self):
         self.enable_auxiliary_fixture()
         self.start()

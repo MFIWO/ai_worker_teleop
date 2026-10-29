@@ -138,6 +138,17 @@ bash "$TELEOP_REPO/teleop.sh" pc \
 # 양쪽 stick 클릭: HEAD/MOBILE 전환. 왼쪽 head/mobile 축 선택 정책 유지.
 # 변경된 Y pose JSON은 robot 설치 + 세션 재시작으로 반영(C++ 재빌드 불필요).
 # 이번 전체 버전 업데이트는 4번 SH5 C++ 빌드도 수행해야 합니다.
+# robot 명령에 --base-speed 0.10 --turn-speed 0.15 추가 가능.
+# --base-speed: 전후/좌우 최대 이동 속도 m/s (기본 0.20, 범위 0..0.20).
+# --turn-speed: 좌우 회전 최대 속도 rad/s (기본 1/3, 범위 0..1/3).
+# PC 명령은 그대로 사용. 속도 선택은 robot gate에서 적용되며 C++ 재빌드 불필요.
+# grip 해제 / B+Y HOLD 중에도 Loop 데이터는 30Hz 연속 전송.
+# HOLD action은 측정 위치로 기록하며 action_valid=0. 로봇에 추가 명령을 보내지 않음.
+# 첫 프레임부터 기록 열 고정: lift 명령이 뒤늦게 생겨 Parquet 저장 실패하던 오류 수정.
+# 기본 training: 19채널(관절 관측/명령 12 + flags/valid 3 + 양손 pressure/status 4).
+# robot-aiworker.parquet에 observation.left_hand.tactile_pressure / right_hand.tactile_pressure 포함.
+# pressure는 손마다 45개. 누락/오래된 데이터는 NaN, tactile_status의 fresh=0으로 구분.
+# 변경 후 Loop Preview에서 aiworker를 다시 선택하고 Cell Config 저장 후 새 recording 시작.
 
 # ============================================================
 # 7. 종료 / 로그 / 선택적 상세 trace

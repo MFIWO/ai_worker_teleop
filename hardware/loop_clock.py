@@ -33,15 +33,14 @@ class PCRecordingClock:
 
 
 class ClockedRobotStreamer:
-    """One aiworker SDK Robot State source with robot AND hand joint positions."""
+    """One aiworker SDK Robot State with robot/hand joints and numeric pressure."""
     def __init__(self, loop_addr, mapper, clock, *, selected_channels=None):
         self.loop_addr, self.mapper, self.clock = loop_addr, mapper, clock
         self.producer = None
         self.sent_count = 0
         # CHANGED(2026-10-28): Both hands and robot are in this same schema.
         self.channel_keys = (tuple(selected_channels) if selected_channels is not None
-                             else tuple(i.key for i in mapper.channel_infos()
-                                        if '.tactile_' not in i.key)
+                             else tuple(i.key for i in mapper.channel_infos())
                              if mapper is not None else None)
 
     @staticmethod
@@ -169,20 +168,21 @@ class SplitRobotStreamer:
             self.close()
             raise
 
-    def send(self, payload):
+    def send(self, payload, *, tactile_payload=None):
         stamp = self.clock.timestamp(time.monotonic())
         if stamp is None:
             return False
         self.robot.send(payload, stamp=stamp)
+        raw = payload if tactile_payload is None else tactile_payload
         if self.tactile is not None:
             if self.tactile.producer is None:
-                ready = all(payload.get(f'ffw_sh5_vr.observation.{s}_hand.tactile_pressure') is not None
+                ready = all(raw.get(f'ffw_sh5_vr.observation.{s}_hand.tactile_pressure') is not None
                             for s in HAND_SIDES)
                 if not ready:
                     return True
                 self.tactile.connect()
             self.tactile.sent_count=self.robot.sent_count-1
-            self.tactile.send(payload, stamp=stamp)
+            self.tactile.send(raw, stamp=stamp)
         return True
 
     def close(self):

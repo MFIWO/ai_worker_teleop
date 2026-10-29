@@ -12,7 +12,7 @@ import threading
 import time
 
 from hardware.session_processes import start,stop,wait
-from hardware.teleop_cli import ipv4,hostname
+from hardware.teleop_cli import ipv4,hostname,base_speed,turn_speed
 
 
 class SessionLog:
@@ -266,6 +266,8 @@ def main():
     p.add_argument('--robot-ip',required=True,type=hostname)
     p.add_argument('--bringup',action='store_true')
     p.add_argument('--ready-pose',action='store_true')
+    p.add_argument('--base-speed',type=base_speed,default=.2)
+    p.add_argument('--turn-speed',type=turn_speed,default=1/3)
     p.add_argument('--loop',choices=('off','vr'),default='off')
     p.add_argument('--input',choices=('hands','controllers'),default='hands')
     p.add_argument('--hand-mode',choices=('1','2'),default='1')
@@ -278,6 +280,8 @@ def main():
     args=p.parse_args()
     os.environ['AI_WORKER_SH5_INPUT']=args.input
     os.environ['AI_WORKER_SH5_HAND_MODE']=args.hand_mode
+    os.environ['AI_WORKER_BASE_SPEED']=str(args.base_speed)
+    os.environ['AI_WORKER_TURN_SPEED']=str(args.turn_speed)
     lock=open('/tmp/sh5_vr_session.lock','w')
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise SystemExit('Another SH5 session launcher is running')

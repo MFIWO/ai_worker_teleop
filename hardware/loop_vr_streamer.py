@@ -6,7 +6,7 @@ import signal
 import tempfile
 import time
 
-from hardware.loop_vr_contract import RecordingStatus, vr_parameters
+from hardware.loop_vr_contract import RecordingStatus, vr_parameters, recording_payload
 from hardware.loop_clock import PCRecordingClock,SplitRobotStreamer
 from hardware.hx5_tactile import HAND_MODEL,PRESSURE_TOPICS,TactileReadings,dynamic_hand_message
 
@@ -41,17 +41,26 @@ def main():
 
     class VRMapper(RobotStepMapper):
         def channel_infos(self):
-            return super().channel_infos() + [ChannelInfo(
+            infos = super().channel_infos() + [ChannelInfo(
                 key=f'{self.robot_type}.teleop.{name}', label=label, unit=unit, group='teleop')
                 for name, label, unit in (
                     ('flags', 'active,paused,manual_active,fault,status_fresh', 'bool'),
                     ('phase', 'phase code (see VR_LOOP.md)', 'enum'),
                     ('action_fresh', 'left_arm,right_arm,left_hand,right_hand,head,lift,mobile', 'bool'),
                     ('action_valid', 'left_arm,right_arm,left_hand,right_hand,head,lift,mobile', 'bool'),
+                    ('observation_valid', 'left_arm,right_arm,left_hand,right_hand,head,lift,mobile', 'bool'),
                     ('ages', 'joint_receipt,gate_receipt,intent_receipt (-1=missing)', 's'),
                     ('clock', 'pc_anchor_age,robot_minus_pc_wallclock', 's'),
                     ('controller_inputs', 'left_trigger,left_grip,right_trigger,right_grip', 'normalized'),
                     ('hand_pose_state', 'hand_mode,pending_pose,left_pose,right_pose (see VR_LOOP.md)', 'enum'))]
+            if not args.no_tactile:
+                for side in PRESSURE_TOPICS:
+                    for name, label, unit in (
+                            ('tactile_pressure', 'thumb,index,middle,ring,little; nine raw counts (0..255) each', ''),
+                            ('tactile_status', 'received,valid,fresh,hz', '')):
+                        infos.append(ChannelInfo(key=f'{self.robot_type}.observation.{side}_hand.{name}',
+                                                 label=label, unit=unit, group='observation.' + side + '_hand'))
+            return infos
 
     class VRNode(LoopStreamerNode):
         def __init__(self):
@@ -203,7 +212,8 @@ def main():
             payload=self.mapper.build_payload(follower_positions=observed,
                 leader_positions=self._collect_leader_positions(),mobile_state=mobile,
                 mobile_command=self._twist_vector(self._leader_mobile_msg))
-            payload.update({f'{self.robot_type}.teleop.{k}':v for k,v in self.recording_status.values(now).items()})
+            status=self.recording_status.values(now)
+            payload.update({f'{self.robot_type}.teleop.{k}':v for k,v in status.items()})
             if self.enable_tactile:
                 payload.update(self.tactile.payload(self.robot_type,now))
             # Keep raw button depths during HOLD; they are inputs, not actions.
@@ -236,7 +246,8 @@ def main():
             anchor_age=(-1. if self.recording_clock.last_receipt is None else now-self.recording_clock.last_receipt)
             skew=(-1. if self.recording_clock.anchor is None else time.time()-self.recording_clock.anchor-now)
             payload[f'{self.robot_type}.teleop.clock']=[anchor_age,skew]
-            self.robot_streamer.send(payload)
+            # Typed tactile remains raw/nullable; numeric Parquet columns stay fixed.
+            self.robot_streamer.send(recording_payload(payload,self.robot_type,status), tactile_payload=payload)
             self._tick_count+=1
 
     def interrupt(*_):

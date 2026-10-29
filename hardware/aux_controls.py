@@ -11,6 +11,22 @@ BASE_LIMITS = (.2, .2, 1 / 3)
 SG2_LEGACY_GRIPPER_MAX_POSITION = 1.3
 
 
+def mobile_speed(value, maximum):
+    value = float(value)
+    if not math.isfinite(value) or not 0 <= value <= maximum:
+        raise ValueError(f'speed must be finite and between 0 and {maximum:g}')
+    return value
+
+
+def scale_base_command(base, linear_speed, turn_speed):
+    """Robot-owned speed selection after validating the original PC stick range."""
+    linear_speed = mobile_speed(linear_speed, BASE_LIMITS[0])
+    turn_speed = mobile_speed(turn_speed, BASE_LIMITS[2])
+    return [base[0] * (linear_speed / BASE_LIMITS[0]),
+            base[1] * (linear_speed / BASE_LIMITS[1]),
+            base[2] * (turn_speed / BASE_LIMITS[2])]
+
+
 def read_aux_limits(text, *, sg2_legacy_gripper=False, include_grippers=True):
     """Read URDF limits; SG2 may explicitly restore the original VR command range."""
     root = ET.fromstring(text)

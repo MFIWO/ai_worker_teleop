@@ -20,7 +20,8 @@ class LoopRuntimeTests(unittest.TestCase):
         from sensor_msgs.msg import JointState
         from control_msgs.msg import DynamicJointState, InterfaceValue
         from trajectory_msgs.msg import JointTrajectory,JointTrajectoryPoint
-        from loop_sdk import SourceProducer
+        from loop_sdk import SourceProducer, RobotFrame
+        from loop_sdk.source.outbound.proto_mapping import _sample, frame_from_sample
         from hardware.loop_vr_contract import GROUPS,TOPICS
         from hardware.hx5_tactile import SENSOR_NAMES, PRESSURE_NAMES
         from hardware.loop_vr_streamer import main
@@ -32,7 +33,12 @@ class LoopRuntimeTests(unittest.TestCase):
             def stats(self):return SimpleNamespace(connected=True)
             def send_robot(self,stamp,sequence,payload):
                 assert self.kind=='robot'
-                frames.append((stamp,sequence,payload))
+                # Use the installed SDK's real protobuf codec: None would be
+                # omitted here and reproduce the observed Parquet column drift.
+                sample=_sample(RobotFrame(timestamp_us=stamp,sequence=sequence,state=payload))
+                wire=type(sample).FromString(sample.SerializeToString())
+                decoded=frame_from_sample('fixture',wire)
+                frames.append((stamp,sequence,decoded.state))
             def send_tactile(self,*args):
                 assert self.kind=='tactile'
                 tactile_frames.append(args)
@@ -57,7 +63,7 @@ class LoopRuntimeTests(unittest.TestCase):
                     manual=2.6<elapsed<3.6
                     names=[n for group,names in GROUPS.items() if group!='mobile' for n in names]
                     feedback.publish(JointState(name=names,position=[.1]*len(names)))
-                    if 2.6<elapsed<3.6:
+                    if .7<elapsed<3.6:
                         sensor_names=[name for side in ('left','right') for name in SENSOR_NAMES[side]]
                         msg=DynamicJointState(joint_names=sensor_names,interface_values=[
                             InterfaceValue(interface_names=list(PRESSURE_NAMES),values=[float(v) for v in range(9)])
@@ -71,6 +77,7 @@ class LoopRuntimeTests(unittest.TestCase):
                         status_sequence=seq,enabled=active,forwarding=active,manual_active=manual,fault=None))))
                     if active:
                         for name,pub in commands.items():
+                            if name in ('head','lift') and elapsed<3.6:continue
                             pub.publish(JointTrajectory(joint_names=list(GROUPS[name]),
                                 points=[JointTrajectoryPoint(positions=[.2]*len(GROUPS[name]))]))
                     for _ in range(6):rclpy.spin_once(streamer,timeout_sec=0.)
@@ -88,7 +95,8 @@ class LoopRuntimeTests(unittest.TestCase):
         declared={c.key for c in schemas[0].robot.channels}
         self.assertIn('ffw_sh5_vr.observation.left_hand.joint_position',declared)
         self.assertIn('ffw_sh5_vr.observation.left_arm.joint_position',declared)
-        self.assertFalse(any('tactile' in k for k in declared))
+        self.assertIn('ffw_sh5_vr.observation.right_hand.tactile_pressure',declared)
+        self.assertIn('ffw_sh5_vr.observation.left_hand.tactile_status',declared)
         self.assertGreater(len(frames),50)
         prefix='ffw_sh5_vr.'
         active=[f for f in frames if f[2][prefix+'teleop.flags'][0]]
@@ -102,10 +110,17 @@ class LoopRuntimeTests(unittest.TestCase):
             self.assertEqual(payload[prefix+'observation.left_arm.joint_position'],[.1]*7)
             self.assertEqual(payload[prefix+'observation.left_hand.joint_position'],[.1]*20)
             if payload[prefix+'action.left_arm.joint_position'] is not None:
-                self.assertEqual(payload[prefix+'action.left_arm.joint_position'],[.2]*7)
+                self.assertEqual(payload[prefix+'action.left_arm.joint_position'],[.1]*7)
             self.assertLess(abs(stamp-epoch),10000000)
         stamps=[f[0] for f in frames]
         self.assertTrue(all(a<b for a,b in zip(stamps,stamps[1:])))
+        # Every declared field exists from the first tick, before lift/pressure arrive.
+        self.assertTrue(all(set(frame[2])==declared for frame in frames))
+        self.assertTrue(all(all(v is not None for v in frame[2].values()) for frame in frames))
+        widths={key:len(value) for key,value in frames[0][2].items()}
+        self.assertTrue(all({k:len(v) for k,v in frame[2].items()}==widths for frame in frames))
+        self.assertEqual(frames[0][2][prefix+'action.lift.joint_position'],[.1])
+        self.assertTrue(any(f[2][prefix+'observation.right_hand.tactile_pressure']==list(range(9))*5 for f in held))
 
 
 if __name__=='__main__':unittest.main()

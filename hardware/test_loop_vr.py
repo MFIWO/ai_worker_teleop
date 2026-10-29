@@ -3,16 +3,66 @@ from copy import deepcopy
 from contextlib import redirect_stderr
 import io
 import math
+from pathlib import Path
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 from hardware.loop_clock import PCRecordingClock,ClockedRobotStreamer
 
 from hardware.keyboard_controls import keyboard_aux
-from hardware.loop_vr_contract import GROUPS, RecordingStatus, vr_parameters
+from hardware.loop_vr_contract import GROUPS, RecordingStatus, vr_parameters, recording_payload
 from hardware.teleop_cli import parser, command
 
 
 class LoopVRTests(unittest.TestCase):
+    def test_hold_and_late_lift_keep_numeric_parquet_columns_fixed(self):
+        prefix='ffw_sh5_vr.'
+        payload={}
+        for group,names in GROUPS.items():
+            suffix='velocity' if group=='mobile' else 'joint_position'
+            payload[prefix+f'observation.{group}.{suffix}']=[.1]*len(names)
+            payload[prefix+f'action.{group}.{suffix}']=None
+        pressure=prefix+'observation.right_hand.tactile_pressure'
+        payload[pressure]=None
+        initial=recording_payload(payload,'ffw_sh5_vr',dict(action_valid=[0.]*7))
+        self.assertTrue(all(value is not None for value in initial.values()))
+        self.assertTrue(all(math.isnan(v) for v in initial[pressure]))
+        self.assertEqual(initial[prefix+'action.lift.joint_position'],[.1])
+        payload[pressure]=list(range(45))
+        payload[prefix+'action.lift.joint_position']=[.3]
+        active=recording_payload(payload,'ffw_sh5_vr',dict(action_valid=[1.]*7))
+        self.assertEqual(set(initial),set(active))
+        self.assertEqual({k:len(v) for k,v in initial.items()}, {k:len(v) for k,v in active.items()})
+        self.assertEqual(active[prefix+'action.lift.joint_position'],[.3])
+        held=recording_payload(payload,'ffw_sh5_vr',dict(action_valid=[0.]*7))
+        self.assertEqual(held[prefix+'action.lift.joint_position'],[.1])
+        self.assertEqual(held[pressure],list(range(45)))
+        self.assertEqual(held[prefix+'teleop.action_valid'],[0.]*7)
+
+    def test_missing_feedback_is_explicitly_invalid_and_never_zero_filled(self):
+        prefix='ffw_sh5_vr.'
+        payload=recording_payload({},'ffw_sh5_vr',dict(action_valid=[1.]*7))
+        self.assertEqual(payload[prefix+'teleop.observation_valid'],[0.]*7)
+        self.assertEqual(payload[prefix+'teleop.action_valid'],[0.]*7)
+        self.assertTrue(all(math.isnan(v) for v in payload[prefix+'observation.left_hand.joint_position']))
+
+    def test_robot_speed_flags_are_validated_and_forwarded(self):
+        args=parser().parse_args(['robot','--pc-ip','192.168.6.56','--robot-ip','192.168.6.2',
+                                 '--base-speed','.1','--turn-speed','.15'])
+        remote=command(args,False)[-1]
+        self.assertIn('--base-speed 0.1',remote)
+        self.assertIn('--turn-speed 0.15',remote)
+        # The host entry point runs the file directly, not python -m hardware.
+        smoke=subprocess.run([sys.executable,str(Path(__file__).with_name('teleop_cli.py')),
+            'robot','--pc-ip','192.168.6.56','--robot-ip','192.168.6.2',
+            '--base-speed','.1','--turn-speed','.15','--dry-run'],
+            text=True,capture_output=True,check=True)
+        self.assertIn('--base-speed 0.1',smoke.stdout)
+        for flag,value in (('--base-speed','nan'),('--base-speed','.3'),('--turn-speed','-1')):
+            with self.assertRaises(SystemExit),redirect_stderr(io.StringIO()):
+                parser().parse_args(['robot','--pc-ip','192.168.6.56','--robot-ip','192.168.6.2',flag,value])
+
     def test_camera_configuration_and_leader_layout_are_preserved(self):
         original={'/**':{'ros__parameters':{'ffw_sg2_rev1':{
             'camera_topic_list':['cam_head_left:/loop/left','cam_wrist_left:/camera/left'],
