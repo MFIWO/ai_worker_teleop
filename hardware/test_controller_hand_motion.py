@@ -168,7 +168,7 @@ class HandMotionTests(unittest.TestCase):
         self.assertEqual(modes.selected,'full_grip')
 
     def test_A_X_Y_select_requested_finger_poses(self):
-        for button,expected in (('A','pointing'),('X','index_pinch'),('Y','thumb_index_pinch')):
+        for button,expected in (('A','thumb_out_grip'),('X','index_pinch'),('Y','thumb_index_pinch')):  # [CHANGED 2026-10-29]
             modes=ControllerHandModes()
             left,right=({'aButton':True}, {}) if button=='X' else (({'bButton':True}, {}) if button=='Y' else ({}, {'aButton':True}))
             modes.buttons(left,right,now=0.)
@@ -179,6 +179,57 @@ class HandMotionTests(unittest.TestCase):
             for side,names in FINGER_NAMES.items():
                 for joint,goal in zip(names,POSES[side][expected]):
                     self.assertAlmostEqual(commanded[joint],goal)
+
+    def test_A_restores_historical_thumb_first_four_finger_targets(self):
+        # [ADDED 2026-10-29] Exact A endpoints from main e321ba8, no invented motor goals.
+        for side,names in FINGER_NAMES.items():
+            a = POSES[side]['thumb_out_grip']
+            full = POSES[side]['full_grip']
+            self.assertEqual(a[:4], [-.15,.55,0.,0.] if side=='left'
+                             else [.297,-.55,0.,0.])
+            self.assertEqual(a[4:],full[4:])  # All four fingers participate.
+            for depth in (0.,.25,.5,1.):
+                reached = targets(POSES,controls('thumb_out_grip',trigger=depth))
+                for name,opened,closed in zip(names,POSES[side]['open'],a):
+                    self.assertAlmostEqual(reached[name],opened+depth*(closed-opened))
+
+    def test_A_thumb_first_preparation_holds_four_fingers_until_measured_arrival(self):
+        # [ADDED 2026-10-29] No finger closure before measured thumb opposition.
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.poses,hand.preparing=POSES,{}
+        hand.controls={'left':dict(pose='thumb_out_grip',trigger=1.,grip=0.),
+                       'right':dict(pose='full_grip',trigger=0.,grip=0.)}
+        measured={n:v for side,names in FINGER_NAMES.items()
+                  for n,v in zip(names,POSES[side]['open'])}
+        left=FINGER_NAMES['left']
+        target=targets(POSES,hand.controls)
+        result=hand.prepare_targets(dict(target),measured,1.)
+        for name,want in zip(left[:4],POSES['left']['thumb_out_grip'][:4]):
+            self.assertAlmostEqual(result[name],want)
+        for name in left[4:]:
+            self.assertAlmostEqual(result[name],measured[name])
+        self.assertFalse(hand.preparing['left']['done'])
+        for name,want in zip(left[:4],POSES['left']['thumb_out_grip'][:4]):
+            measured[name]=want
+        second=hand.prepare_targets(dict(target),measured,1.2)
+        self.assertTrue(hand.preparing['left']['done'])
+        for name in left[4:]:
+            self.assertAlmostEqual(second[name],target[name])
+        hand.controls['left']['trigger']=0.
+        hand.prepare_targets(dict(targets(POSES,hand.controls)),measured,1.3)
+        self.assertNotIn('left',hand.preparing)
+
+    def test_A_missing_thumb_feedback_times_out_instead_of_forcing_finger_closure(self):
+        # [ADDED 2026-10-29] Unreachable thumb target must fail closed.
+        hand=SH5HandOutput.__new__(SH5HandOutput)
+        hand.poses,hand.preparing=POSES,{}
+        hand.controls={'left':dict(pose='thumb_out_grip',trigger=.8,grip=0.),
+                       'right':dict(pose='full_grip',trigger=0.,grip=0.)}
+        measured={n:v for side,names in FINGER_NAMES.items()
+                  for n,v in zip(names,POSES[side]['open'])}
+        hand.prepare_targets(targets(POSES,hand.controls),measured,0.)
+        with self.assertRaisesRegex(ValueError,'left: thumb_out_grip preparation not reached'):
+            hand.prepare_targets(targets(POSES,hand.controls),measured,8.1)
 
     def test_deep_thumb_exceeds_old_angled_and_ulnar_fingers_are_independent(self):
         for side,poses in POSES.items():
