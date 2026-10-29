@@ -302,9 +302,20 @@ move the base/head/lift; continuous observations preserve those events.
 The read-only adapter subscribes to `/left_hand/finger_pressures` and
 `/right_hand/finger_pressures` (`robotis_interfaces/msg/HandPressures`). It
 uses the existing follower pressure broadcasters and never opens a second
-serial connection or starts a tactile grasp controller. The official current
-SH5 follower launch includes `pressure_l_broadcaster` and
-`pressure_r_broadcaster`; older installed workspaces may not have these.
+serial connection or starts a tactile grasp controller. For `--loop vr`, the
+robot session builds the vendored, unmodified ROBOTIS pressure broadcaster in
+`/workspace/ai_worker_xr_hand_pressure` and adds its overlay to the SH5 follower.
+It activates `pressure_l_broadcaster` and `pressure_r_broadcaster` on the
+existing `/controller_manager`, verifies their 45 state interfaces per hand
+and checks both `HandPressures` messages before the ready motion. Already
+active matching broadcasters are reused. A follower started without this
+overlay must be restarted with `--bringup`. `--loop-no-tactile` skips this step.
+
+Do not additionally run `ros2 launch robotis_hand_bringup
+hx5_d20_right.launch.py`: that standalone launch starts another hardware
+controller manager and hand initialization/current commands. It is not
+necessary to power or enable tactile sensors on the SH5. The isolated plugin
+build and state-only broadcasters do not send motor commands.
 
 Each hand's 20-joint observation/action vectors are part of **aiworker**
 Robot State. The independent **HX5-D20 Tactile** source carries two typed
@@ -315,12 +326,17 @@ on the aiworker Robot State schema.
 Pressure ordering is `finger_l_sensor1..5` / `finger_r_sensor1..5`, each with
 `Present Pressure 1..9` in row-major order (top to bottom, left to right).
 The adapter resolves both sensor names and pressure names; array arrival order
-does not change this layout. Sensor numbers are kept verbatim rather than
-guessing their anatomical finger names. Missing/duplicate sensors, invalid
+does not change this layout. The ROBOTIS finger ordering is thumb, index,
+middle, ring, little; pressing the physical right thumb confirmed sensor1
+(ID115) changes through 0..255 and returns to zero when released. The two
+typed channels represent the two hands, not two individual fingers.
+Missing/duplicate sensors, invalid
 interface names and values outside 0..255 invalidate that hand's sample.
 Malformed or older-than-0.5-second pressures are omitted, not
 fabricated zeros. Local status, receipt timing and validity checks remain
 in the parser, but are not automatically sent as robot state channels.
+ROS fixed uint8 arrays contain `numpy.uint8` scalars; the parser accepts these
+integer readings and converts them to Python integers for the Loop payload.
 
 The HX5-D20 typed Tactile source uses the same 30 Hz PC-anchored clock
 and tick sequence as aiworker. Upstream frames faster than 30 Hz are not

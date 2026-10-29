@@ -86,6 +86,9 @@ if ! python3 -B -m hardware.build_hand_write_rate --verify-only; then
   python3 -B -m hardware.build_hand_write_rate
 fi
 python3 -B -m hardware.build_hand_write_rate --verify-only
+# 공식 ROBOTIS 촉각 broadcaster만 별도 빌드. 모터/별도 손 드라이버 실행 없음.
+python3 -B -m hardware.build_hand_pressure
+python3 -B -m hardware.build_hand_pressure --verify-only
 ROBOT_BUILD
 # 두 빌드가 Verified여야 실행합니다. 전체 AI Worker colcon 재빌드는 불필요합니다.
 # 새 프로필은 다음 robot 세션이 생성·검증합니다. 예전 프로필을 수동 복사하지 마세요.
@@ -169,3 +172,10 @@ TRACE_BUILD
 # 추가 수정 반영: PC install + robot 소스 재배포 후 SH5 C++ --rebuild 필요.
 # HX5-D20 촉각 소스는 양손 실제 압력 데이터가 들어온 뒤에만 Loop에 등록됨.
 # HandPressures broadcaster가 없으면 /dynamic_joint_states의 센서 인터페이스를 사용.
+# --loop vr 실행 시 공식 pressure_l/r_broadcaster를 기존 SH5 controller_manager에 추가.
+# 처음에는 follower를 종료 후 --bringup으로 재시작해야 촉각 plugin overlay가 반영됨.
+# hx5_d20_right.launch.py를 별도로 실행하지 않음(손 포트/하드웨어 드라이버 중복 방지).
+# 확인: ros2 control list_controllers / ros2 topic echo /right_hand/finger_pressures --once
+# 양손 각각 sensor1..5 = 엄지/검지/중지/약지/새끼, 손가락마다 압력 9개(0..255).
+# 무접촉에서 0은 정상. 오른손 엄지 ID115 눌렀을 때 255까지 반응하고 떼면 0 확인.
+# ROS uint8 배열(numpy.uint8)을 거부하던 파서도 수정. 실제 ROS 메시지 회귀검사 통과.

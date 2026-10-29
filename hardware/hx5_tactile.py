@@ -6,6 +6,7 @@ order. A pressure value is an unsigned raw count, not a calibrated force.
 """
 from collections import deque
 import math
+from numbers import Integral
 from types import SimpleNamespace
 
 
@@ -57,9 +58,10 @@ def parse_pressures(side, message):
         names, values = tuple(sensor.pressure_names), tuple(sensor.pressure_values)
         if len(names) != 9 or len(values) != 9 or set(names) != set(PRESSURE_NAMES):
             raise ValueError(f'{name}: expected nine named Present Pressure interfaces')
-        if any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 255 for v in values):
+        # ROS fixed uint8 arrays deserialize as numpy.uint8, not Python int.
+        if any(isinstance(v, bool) or not isinstance(v, Integral) or not 0 <= v <= 255 for v in values):
             raise ValueError(f'{name}: raw pressure must be uint8 (0..255)')
-        by_name = dict(zip(names, values))
+        by_name = dict(zip(names, map(int, values)))
         sensors[name] = tuple(by_name[key] for key in PRESSURE_NAMES)
     if set(sensors) != set(SENSOR_NAMES[side]):
         raise ValueError('expected all five fingertip sensors')

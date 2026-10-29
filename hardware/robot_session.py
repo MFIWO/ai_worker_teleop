@@ -298,6 +298,9 @@ def main():
     if args.loop=='vr':
         subprocess.run([sys.executable,'-c','import ffw_loop_streamer.loop_streamer_node; import loop_sdk'],check=True)
         if not listening(args.pc_ip,50051):raise SystemExit(f'Open Loop on {args.pc_ip}:50051 first')
+        if not args.loop_no_tactile:
+            # Build/discover the official state-only plugin before any physical startup.
+            subprocess.run([sys.executable,'-m','hardware.build_hand_pressure'],check=True)
     logs=Path('/workspace/ai_worker_xr_sessions')/str(time.time_ns())
     logs.mkdir(parents=True)
     services=[]
@@ -358,6 +361,9 @@ def main():
             else:
                 from hardware.build_hand_write_rate import follower_environment
                 follower_env=follower_environment()
+            if args.loop=='vr' and not args.loop_no_tactile:
+                from hardware.build_hand_pressure import follower_environment as pressure_environment
+                follower_env=pressure_environment(base=follower_env)
             # [CHANGED 2026-10-28] Report the bounded shared RX wait accurately.
             print('[HAND WRITE] Existing serial/ID route, HX5 packets 30 Hz; '
                   'shared BulkRead wait cap=60 ms; stock read failure and arm write policy retained.',
@@ -380,6 +386,8 @@ def main():
             print('[BRINGUP REUSED] This verified SH5 launch will also stop on session exit so the hand port can be released.',flush=True)
         if any('leader' in name.lower() and name.endswith('controller_manager') for name in nodes):
             raise RuntimeError('Physical leader must be stopped for VR mode')
+        if args.loop=='vr' and not args.loop_no_tactile:
+            run_logged([sys.executable,'-m','hardware.hand_pressure_bringup'],timeout=120.)
         if not follower or args.ready_pose:
             mover=start([sys.executable,'-m','hardware.ready_pose','--model','sh5','--duration','5','--lift-first'])
             children.append(('lift then arms ready',mover))

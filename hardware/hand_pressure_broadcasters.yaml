@@ -1,0 +1,24 @@
+controller_manager:
+  ros__parameters:
+    pressure_l_broadcaster:
+      type: robotis_hand_pressure_broadcaster/PressureBroadcaster
+    pressure_r_broadcaster:
+      type: robotis_hand_pressure_broadcaster/PressureBroadcaster
+
+pressure_l_broadcaster:
+  ros__parameters:
+    type: robotis_hand_pressure_broadcaster/PressureBroadcaster
+    sensor_names: [finger_l_sensor1, finger_l_sensor2, finger_l_sensor3, finger_l_sensor4, finger_l_sensor5]
+    interface_names: [Present Pressure 1, Present Pressure 2, Present Pressure 3, Present Pressure 4, Present Pressure 5, Present Pressure 6, Present Pressure 7, Present Pressure 8, Present Pressure 9]
+    hand_name: left
+    frame_id: hand_l_link
+    topic_name: /left_hand/finger_pressures
+
+pressure_r_broadcaster:
+  ros__parameters:
+    type: robotis_hand_pressure_broadcaster/PressureBroadcaster
+    sensor_names: [finger_r_sensor1, finger_r_sensor2, finger_r_sensor3, finger_r_sensor4, finger_r_sensor5]
+    interface_names: [Present Pressure 1, Present Pressure 2, Present Pressure 3, Present Pressure 4, Present Pressure 5, Present Pressure 6, Present Pressure 7, Present Pressure 8, Present Pressure 9]
+    hand_name: right
+    frame_id: hand_r_link
+    topic_name: /right_hand/finger_pressures
